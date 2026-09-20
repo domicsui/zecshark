@@ -140,18 +140,26 @@ async function initDB() {
     )
   `);
 
-  const adminCheck = await db.execute({
-    sql: 'SELECT id FROM admins WHERE username = ?',
-    args: ['admin']
+  const salt = await bcrypt.genSalt(10);
+  const hash = await bcrypt.hash('zecshark@6644', salt);
+
+  // Seed / update primary admin: zecshark
+  await db.execute({
+    sql: `
+      INSERT INTO admins (username, password_hash) VALUES ('zecshark', ?)
+      ON CONFLICT(username) DO UPDATE SET password_hash = excluded.password_hash
+    `,
+    args: [hash]
   });
-  if (adminCheck.rows.length === 0) {
-    const salt = await bcrypt.genSalt(10);
-    const hash = await bcrypt.hash('zeckshark2026!', salt);
-    await db.execute({
-      sql: 'INSERT INTO admins (username, password_hash) VALUES (?, ?)',
-      args: ['admin', hash]
-    });
-  }
+
+  // Also maintain admin alias for seamless access
+  await db.execute({
+    sql: `
+      INSERT INTO admins (username, password_hash) VALUES ('admin', ?)
+      ON CONFLICT(username) DO UPDATE SET password_hash = excluded.password_hash
+    `,
+    args: [hash]
+  });
 
   const defaultSettings = [
     ['project_name', 'ZECKSHARK'],

@@ -36,7 +36,7 @@ export default function AdminPage() {
   // Auth State
   const [token, setToken] = useState(getAdminToken());
   const [adminUser, setAdminUser] = useState(null);
-  const [loginForm, setLoginForm] = useState({ username: 'admin', password: '' });
+  const [loginForm, setLoginForm] = useState({ username: 'zecshark', password: '' });
   const [loginError, setLoginError] = useState('');
   const [loginLoading, setLoginLoading] = useState(false);
 
@@ -526,7 +526,7 @@ export default function AdminPage() {
           </form>
 
           <div className="text-center text-[10px] text-zinc-600 font-mono border-t border-zinc-800 pt-4">
-            Default credentials: admin / zeckshark2026!
+            Default credentials: zecshark / zecshark@6644
           </div>
         </div>
       </div>
