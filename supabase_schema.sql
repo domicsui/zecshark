@@ -1,10 +1,15 @@
 -- ==========================================================
--- ZECKSHARK SUPABASE CANONICAL SCHEMA & MIGRATION SCRIPT
+-- ZECKSHARK SUPABASE COMPLETE CANONICAL SCHEMA & MIGRATION
 -- ==========================================================
--- Run this script in your Supabase SQL Editor:
--- https://supabase.com/dashboard/project/_/sql
+-- Instructions:
+-- 1. Open Supabase Dashboard: https://supabase.com/dashboard/project/_/sql
+-- 2. Click "New Query" (SQL Editor)
+-- 3. Paste this ENTIRE file and click "Run" (Ctrl + Enter)
+-- ==========================================================
 
--- 1. Create canonical settings table
+-- ----------------------------------------------------------
+-- 1. SETTINGS TABLE (Single Source of Truth for Admin Toggles)
+-- ----------------------------------------------------------
 CREATE TABLE IF NOT EXISTS settings (
   id INT PRIMARY KEY DEFAULT 1,
   waitlist_enabled BOOLEAN NOT NULL DEFAULT true,
@@ -23,7 +28,7 @@ CREATE TABLE IF NOT EXISTS settings (
   CONSTRAINT single_row_check CHECK (id = 1)
 );
 
--- 2. Insert canonical default row (id = 1) if not exists
+-- Insert canonical default row (id = 1)
 INSERT INTO settings (
   id, 
   waitlist_enabled, 
@@ -52,18 +57,14 @@ VALUES (
 )
 ON CONFLICT (id) DO NOTHING;
 
--- 3. Enable Row Level Security (RLS)
+-- Enable RLS for settings
 ALTER TABLE settings ENABLE ROW LEVEL SECURITY;
 
--- 4. RLS Policy: Public read access for settings
--- The public site and anon users can safely view global project settings
 DROP POLICY IF EXISTS "Public read settings" ON settings;
 CREATE POLICY "Public read settings"
   ON settings FOR SELECT
   USING (true);
 
--- 5. RLS Policy: Service role or Authenticated Admin update access
--- The backend server uses the Service Role key (or authenticated admin) to update settings
 DROP POLICY IF EXISTS "Service role update settings" ON settings;
 CREATE POLICY "Service role update settings"
   ON settings FOR UPDATE
@@ -74,7 +75,10 @@ CREATE POLICY "Service role insert settings"
   ON settings FOR INSERT
   WITH CHECK (auth.role() = 'service_role' OR auth.role() = 'authenticated');
 
--- 6. Also support key-value table format if preferred by existing infrastructure
+
+-- ----------------------------------------------------------
+-- 2. SYSTEM_SETTINGS (Key-Value fallback table)
+-- ----------------------------------------------------------
 CREATE TABLE IF NOT EXISTS system_settings (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL,
@@ -98,3 +102,123 @@ INSERT INTO system_settings (key, value) VALUES
   ('applications_open', 'true'),
   ('wallet_checker_enabled', 'true')
 ON CONFLICT (key) DO NOTHING;
+
+
+-- ----------------------------------------------------------
+-- 3. APPLICATIONS TABLE (Waitlist Submissions)
+-- ----------------------------------------------------------
+CREATE TABLE IF NOT EXISTS applications (
+  id BIGSERIAL PRIMARY KEY,
+  application_code TEXT UNIQUE NOT NULL,
+  user_id BIGINT,
+  x_id TEXT NOT NULL,
+  x_username TEXT NOT NULL,
+  wallet_address TEXT NOT NULL,
+  status TEXT DEFAULT 'PENDING',
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()) NOT NULL,
+  updated_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()) NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_applications_x_id ON applications(x_id);
+CREATE INDEX IF NOT EXISTS idx_applications_wallet ON applications(wallet_address);
+
+ALTER TABLE applications ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "Public insert applications" ON applications;
+CREATE POLICY "Public insert applications"
+  ON applications FOR INSERT
+  WITH CHECK (true);
+
+DROP POLICY IF EXISTS "Public read applications" ON applications;
+CREATE POLICY "Public read applications"
+  ON applications FOR SELECT
+  USING (true);
+
+DROP POLICY IF EXISTS "Service role manage applications" ON applications;
+CREATE POLICY "Service role manage applications"
+  ON applications FOR ALL
+  USING (auth.role() = 'service_role' OR auth.role() = 'authenticated');
+
+
+-- ----------------------------------------------------------
+-- 4. ELIGIBLE WALLETS TABLE (Wallet Eligibility Checker)
+-- ----------------------------------------------------------
+CREATE TABLE IF NOT EXISTS eligible_wallets (
+  id BIGSERIAL PRIMARY KEY,
+  wallet_address TEXT UNIQUE NOT NULL,
+  notes TEXT,
+  added_by TEXT DEFAULT 'SYSTEM',
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()) NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_eligible_wallets_address ON eligible_wallets(wallet_address);
+
+ALTER TABLE eligible_wallets ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "Public read eligible_wallets" ON eligible_wallets;
+CREATE POLICY "Public read eligible_wallets"
+  ON eligible_wallets FOR SELECT
+  USING (true);
+
+DROP POLICY IF EXISTS "Service role manage eligible_wallets" ON eligible_wallets;
+CREATE POLICY "Service role manage eligible_wallets"
+  ON eligible_wallets FOR ALL
+  USING (auth.role() = 'service_role' OR auth.role() = 'authenticated');
+
+
+-- ----------------------------------------------------------
+-- 5. TASKS & TASK VERIFICATIONS (X Quests & Verification Flow)
+-- ----------------------------------------------------------
+CREATE TABLE IF NOT EXISTS tasks (
+  id BIGSERIAL PRIMARY KEY,
+  name TEXT NOT NULL,
+  description TEXT NOT NULL,
+  x_account TEXT,
+  x_url TEXT,
+  verification_type TEXT NOT NULL,
+  sort_order INT NOT NULL,
+  is_enabled BOOLEAN DEFAULT true,
+  is_archived BOOLEAN DEFAULT false,
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()) NOT NULL
+);
+
+ALTER TABLE tasks ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "Public read tasks" ON tasks;
+CREATE POLICY "Public read tasks"
+  ON tasks FOR SELECT
+  USING (true);
+
+-- Populate default tasks if empty
+INSERT INTO tasks (id, name, description, x_account, x_url, verification_type, sort_order) VALUES
+  (1, 'CONNECT X', 'Link your official X account to start the verification process.', 'zecshark', 'https://x.com/zecshark', 'OAUTH', 1),
+  (2, 'FOLLOW @ZECSHARK', 'Follow the official @zecshark handle on X for project updates.', 'zecshark', 'https://x.com/zecshark', 'FOLLOW', 2),
+  (3, 'REPOST ANNOUNCEMENT', 'Repost the official launch announcement on X.', 'zecshark', 'https://x.com/zecshark/status/1800000000000000000', 'REPOST', 3),
+  (4, 'LIKE ANNOUNCEMENT', 'Like the official launch announcement on X.', 'zecshark', 'https://x.com/zecshark/status/1800000000000000000', 'LIKE', 4),
+  (5, 'SUBMIT SHIELDED WALLET', 'Provide a valid Zcash Shielded address (Unified u1... or Sapling zs1...).', NULL, NULL, 'WALLET', 5)
+ON CONFLICT (id) DO NOTHING;
+
+CREATE TABLE IF NOT EXISTS task_verifications (
+  id BIGSERIAL PRIMARY KEY,
+  user_id BIGINT,
+  x_id TEXT,
+  task_id INT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'VERIFIED',
+  metadata JSONB,
+  verified_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()) NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_task_verifications_x_id ON task_verifications(x_id);
+CREATE INDEX IF NOT EXISTS idx_task_verifications_user_id ON task_verifications(user_id);
+
+ALTER TABLE task_verifications ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "Public read task_verifications" ON task_verifications;
+CREATE POLICY "Public read task_verifications"
+  ON task_verifications FOR SELECT
+  USING (true);
+
+DROP POLICY IF EXISTS "Service role manage task_verifications" ON task_verifications;
+CREATE POLICY "Service role manage task_verifications"
+  ON task_verifications FOR ALL
+  USING (auth.role() = 'service_role' OR auth.role() = 'authenticated');
