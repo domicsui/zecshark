@@ -136,7 +136,7 @@ async function updateSettings(updates) {
   }
 
   // Handle other text settings if present
-  const textKeys = ['project_name', 'hero_headline', 'hero_subheadline', 'x_account_username', 'x_account_url', 'announcement_url', 'x_verification_mode', 'x_client_id', 'x_bearer_token'];
+  const textKeys = ['project_name', 'hero_headline', 'hero_subheadline', 'x_account_username', 'x_account_url', 'announcement_url', 'x_verification_mode', 'x_client_id', 'x_client_secret', 'x_bearer_token'];
   for (const k of textKeys) {
     if (k in updates) {
       normalized[k] = String(updates[k]);
@@ -266,6 +266,7 @@ function formatSettings(raw, source = 'local') {
     announcement_url: raw.announcement_url || 'https://x.com/zecshark/status/1800000000000000000',
     x_verification_mode: raw.x_verification_mode || 'DEMO',
     x_client_id: raw.x_client_id || '',
+    x_client_secret: raw.x_client_secret || '',
     x_bearer_token: raw.x_bearer_token || '',
     updated_at: raw.updated_at || new Date().toISOString(),
 

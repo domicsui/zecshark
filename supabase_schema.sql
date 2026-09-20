@@ -23,6 +23,7 @@ CREATE TABLE IF NOT EXISTS settings (
   announcement_url TEXT DEFAULT 'https://x.com/zecshark/status/1800000000000000000',
   x_verification_mode TEXT DEFAULT 'DEMO',
   x_client_id TEXT DEFAULT '',
+  x_client_secret TEXT DEFAULT '',
   x_bearer_token TEXT DEFAULT '',
   updated_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()) NOT NULL,
   CONSTRAINT single_row_check CHECK (id = 1)

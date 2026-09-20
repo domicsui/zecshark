@@ -273,36 +273,180 @@ router.post('/connect-x', verificationLimiter, async (req, res) => {
   }
 });
 
-// 2b. X OAuth Redirection Flow & Callback
+// Helper to get X OAuth 2.0 config from environment or Supabase settings
+async function getXOAuthConfig() {
+  try {
+    const settings = await supabaseService.getSettings();
+    const clientId = process.env.X_CLIENT_ID || settings.x_client_id || '';
+    const clientSecret = process.env.X_CLIENT_SECRET || settings.x_client_secret || '';
+    return { clientId: String(clientId).trim(), clientSecret: String(clientSecret).trim() };
+  } catch (err) {
+    return {
+      clientId: (process.env.X_CLIENT_ID || '').trim(),
+      clientSecret: (process.env.X_CLIENT_SECRET || '').trim()
+    };
+  }
+}
+
+// 2b. X OAuth 2.0 Redirection Flow & Callback (Real X API & Demo Mode)
 router.get('/oauth/x', async (req, res) => {
   try {
     const user = await getOrCreateUser(req);
+    const { clientId } = await getXOAuthConfig();
+
+    const host = req.get('host');
+    const isLocalhost = host.includes('localhost') || host.includes('127.0.0.1');
+    const protocol = !isLocalhost || req.get('x-forwarded-proto') === 'https' ? 'https' : req.protocol;
+    const redirectUri = `${protocol}://${host}/api/waitlist/oauth/x/callback`;
+
+    if (clientId) {
+      // REAL X (Twitter) OAuth 2.0 Authorization with PKCE (RFC 7636)
+      const codeVerifier = crypto.randomBytes(32).toString('base64url');
+      const codeChallenge = crypto.createHash('sha256').update(codeVerifier).digest('base64url');
+      const state = crypto.randomBytes(16).toString('hex');
+
+      // Store verifier and state in cookies for the callback
+      res.cookie('x_oauth_verifier', codeVerifier, {
+        maxAge: 15 * 60 * 1000,
+        httpOnly: true,
+        sameSite: 'lax',
+        secure: protocol === 'https',
+        path: '/'
+      });
+      res.cookie('x_oauth_state', state, {
+        maxAge: 15 * 60 * 1000,
+        httpOnly: true,
+        sameSite: 'lax',
+        secure: protocol === 'https',
+        path: '/'
+      });
+      res.cookie('zeckshark_session', user.session_token, {
+        maxAge: 30 * 24 * 3600 * 1000,
+        httpOnly: false,
+        sameSite: 'lax',
+        path: '/'
+      });
+
+      const authUrl = new URL('https://twitter.com/i/oauth2/authorize');
+      authUrl.searchParams.set('response_type', 'code');
+      authUrl.searchParams.set('client_id', clientId);
+      authUrl.searchParams.set('redirect_uri', redirectUri);
+      authUrl.searchParams.set('scope', 'users.read tweet.read');
+      authUrl.searchParams.set('state', state);
+      authUrl.searchParams.set('code_challenge', codeChallenge);
+      authUrl.searchParams.set('code_challenge_method', 'S256');
+
+      console.log(`[X OAuth] Redirecting user to Twitter authorization (client_id: ${clientId.substring(0, 6)}...)`);
+      return res.redirect(authUrl.toString());
+    }
+
+    // Demo/Simulation Mode when X_CLIENT_ID is not configured
     const { username } = req.query;
     const targetUsername = username ? String(username).replace(/^@/, '').trim() : 'zecshark_user';
     const xId = `x_user_${crypto.createHash('md5').update(targetUsername.toLowerCase()).digest('hex').substring(0, 10)}`;
 
-    // In demo mode, simulate instant authorization
     await linkUserToXAccount(user.id, xId, targetUsername, `@${targetUsername}`);
 
     res.cookie('zeckshark_session', user.session_token, { maxAge: 30 * 24 * 3600 * 1000, httpOnly: false, sameSite: 'lax', path: '/' });
     res.cookie('zeckshark_x_id', xId, { maxAge: 30 * 24 * 3600 * 1000, httpOnly: false, sameSite: 'lax', path: '/' });
 
-    res.redirect(`/waitlist?x_connected=true&username=${encodeURIComponent(targetUsername)}&x_id=${encodeURIComponent(xId)}`);
+    return res.redirect(`/waitlist?x_connected=true&username=${encodeURIComponent(targetUsername)}&x_id=${encodeURIComponent(xId)}`);
   } catch (err) {
     console.error('OAuth initiation error:', err);
-    res.redirect('/waitlist?oauth_error=failed');
+    return res.redirect('/waitlist?oauth_error=initiation_failed');
   }
 });
 
 router.get('/oauth/x/callback', async (req, res) => {
   try {
     const user = await getOrCreateUser(req);
-    const { username, x_id, error } = req.query;
+    const { code, state, error, error_description } = req.query;
 
     if (error) {
-      return res.redirect(`/waitlist?oauth_error=${encodeURIComponent(error)}`);
+      console.warn('[X OAuth Error Callback]:', error, error_description);
+      return res.redirect(`/waitlist?oauth_error=${encodeURIComponent(error_description || error)}`);
     }
 
+    const { clientId, clientSecret } = await getXOAuthConfig();
+
+    // 1. If we received an authorization code from real X API:
+    if (code && clientId) {
+      const codeVerifier = req.cookies?.x_oauth_verifier;
+      const savedState = req.cookies?.x_oauth_state;
+
+      if (savedState && state && savedState !== state) {
+        console.warn('[X OAuth] State mismatch error.');
+        return res.redirect('/waitlist?oauth_error=state_mismatch');
+      }
+
+      const host = req.get('host');
+      const isLocalhost = host.includes('localhost') || host.includes('127.0.0.1');
+      const protocol = !isLocalhost || req.get('x-forwarded-proto') === 'https' ? 'https' : req.protocol;
+      const redirectUri = `${protocol}://${host}/api/waitlist/oauth/x/callback`;
+
+      const tokenParams = new URLSearchParams();
+      tokenParams.append('code', code);
+      tokenParams.append('grant_type', 'authorization_code');
+      tokenParams.append('client_id', clientId);
+      tokenParams.append('redirect_uri', redirectUri);
+      if (codeVerifier) {
+        tokenParams.append('code_verifier', codeVerifier);
+      }
+
+      const headers = {
+        'Content-Type': 'application/x-www-form-urlencoded'
+      };
+
+      if (clientSecret) {
+        const credentials = Buffer.from(`${clientId}:${clientSecret}`).toString('base64');
+        headers['Authorization'] = `Basic ${credentials}`;
+      }
+
+      console.log(`[X OAuth] Exchanging code for access token with X API...`);
+      const tokenRes = await fetch('https://api.twitter.com/2/oauth2/token', {
+        method: 'POST',
+        headers,
+        body: tokenParams.toString()
+      });
+
+      const tokenData = await tokenRes.json();
+      if (!tokenRes.ok || !tokenData.access_token) {
+        console.error('[X OAuth Token Error]:', tokenData);
+        return res.redirect(`/waitlist?oauth_error=token_exchange_failed`);
+      }
+
+      // Fetch user profile from X API v2
+      const userProfileRes = await fetch('https://api.twitter.com/2/users/me?user.fields=profile_image_url,name,username', {
+        headers: {
+          'Authorization': `Bearer ${tokenData.access_token}`
+        }
+      });
+
+      const userProfile = await userProfileRes.json();
+      if (!userProfileRes.ok || !userProfile?.data?.id) {
+        console.error('[X OAuth Profile Error]:', userProfile);
+        return res.redirect(`/waitlist?oauth_error=profile_fetch_failed`);
+      }
+
+      const realXUser = userProfile.data;
+      const cleanUsername = realXUser.username;
+      const cleanXId = String(realXUser.id);
+      const displayName = realXUser.name || `@${cleanUsername}`;
+      const avatarUrl = realXUser.profile_image_url || '';
+
+      console.log(`[X OAuth] Successfully authenticated real X account @${cleanUsername} (ID: ${cleanXId})`);
+      await linkUserToXAccount(user.id, cleanXId, cleanUsername, displayName, avatarUrl);
+
+      res.cookie('zeckshark_session', user.session_token, { maxAge: 30 * 24 * 3600 * 1000, httpOnly: false, sameSite: 'lax', path: '/' });
+      res.cookie('zeckshark_x_id', cleanXId, { maxAge: 30 * 24 * 3600 * 1000, httpOnly: false, sameSite: 'lax', path: '/' });
+      res.clearCookie('x_oauth_verifier');
+      res.clearCookie('x_oauth_state');
+
+      return res.redirect(`/waitlist?x_connected=true&username=${encodeURIComponent(cleanUsername)}&x_id=${encodeURIComponent(cleanXId)}`);
+    }
+
+    // 2. Demo/Simulated Callback
+    const { username, x_id } = req.query;
     const cleanUsername = username ? String(username).replace(/^@/, '').trim() : 'zecshark_fren';
     const cleanXId = x_id || `x_user_${crypto.createHash('md5').update(cleanUsername.toLowerCase()).digest('hex').substring(0, 10)}`;
 
@@ -311,10 +455,10 @@ router.get('/oauth/x/callback', async (req, res) => {
     res.cookie('zeckshark_session', user.session_token, { maxAge: 30 * 24 * 3600 * 1000, httpOnly: false, sameSite: 'lax', path: '/' });
     res.cookie('zeckshark_x_id', cleanXId, { maxAge: 30 * 24 * 3600 * 1000, httpOnly: false, sameSite: 'lax', path: '/' });
 
-    res.redirect(`/waitlist?x_connected=true&username=${encodeURIComponent(cleanUsername)}&x_id=${encodeURIComponent(cleanXId)}`);
+    return res.redirect(`/waitlist?x_connected=true&username=${encodeURIComponent(cleanUsername)}&x_id=${encodeURIComponent(cleanXId)}`);
   } catch (err) {
     console.error('OAuth callback error:', err);
-    res.redirect('/waitlist?oauth_error=callback_failed');
+    return res.redirect('/waitlist?oauth_error=callback_failed');
   }
 });
 
