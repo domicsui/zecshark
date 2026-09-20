@@ -161,25 +161,34 @@ CREATE TABLE IF NOT EXISTS applications (
   updated_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()) NOT NULL
 );
 
-CREATE INDEX IF NOT EXISTS idx_applications_x_id ON applications(x_id);
+-- Ensure strict uniqueness per X user ID (Atomic Idempotence)
+CREATE UNIQUE INDEX IF NOT EXISTS idx_applications_unique_x_id ON applications(x_id);
 CREATE INDEX IF NOT EXISTS idx_applications_wallet ON applications(wallet_address);
+CREATE INDEX IF NOT EXISTS idx_applications_status ON applications(status);
+CREATE INDEX IF NOT EXISTS idx_applications_created ON applications(created_at DESC);
+
+-- Grants for PostgreSQL Roles
+GRANT ALL ON applications TO anon, authenticated, service_role;
+GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO anon, authenticated, service_role;
 
 ALTER TABLE applications ENABLE ROW LEVEL SECURITY;
-
-DROP POLICY IF EXISTS "Public insert applications" ON applications;
-CREATE POLICY "Public insert applications"
-  ON applications FOR INSERT
-  WITH CHECK (true);
 
 DROP POLICY IF EXISTS "Public read applications" ON applications;
 CREATE POLICY "Public read applications"
   ON applications FOR SELECT
   USING (true);
 
+DROP POLICY IF EXISTS "Public insert applications" ON applications;
+CREATE POLICY "Public insert applications"
+  ON applications FOR INSERT
+  WITH CHECK (true);
+
+DROP POLICY IF EXISTS "Allow manage applications" ON applications;
 DROP POLICY IF EXISTS "Service role manage applications" ON applications;
-CREATE POLICY "Service role manage applications"
+CREATE POLICY "Allow manage applications"
   ON applications FOR ALL
-  USING (auth.role() = 'service_role' OR auth.role() = 'authenticated');
+  USING (true)
+  WITH CHECK (true);
 
 
 -- ----------------------------------------------------------
@@ -193,7 +202,9 @@ CREATE TABLE IF NOT EXISTS eligible_wallets (
   created_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()) NOT NULL
 );
 
-CREATE INDEX IF NOT EXISTS idx_eligible_wallets_address ON eligible_wallets(wallet_address);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_eligible_wallets_address_unique ON eligible_wallets(wallet_address);
+
+GRANT ALL ON eligible_wallets TO anon, authenticated, service_role;
 
 ALTER TABLE eligible_wallets ENABLE ROW LEVEL SECURITY;
 
@@ -202,10 +213,12 @@ CREATE POLICY "Public read eligible_wallets"
   ON eligible_wallets FOR SELECT
   USING (true);
 
+DROP POLICY IF EXISTS "Allow manage eligible_wallets" ON eligible_wallets;
 DROP POLICY IF EXISTS "Service role manage eligible_wallets" ON eligible_wallets;
-CREATE POLICY "Service role manage eligible_wallets"
+CREATE POLICY "Allow manage eligible_wallets"
   ON eligible_wallets FOR ALL
-  USING (auth.role() = 'service_role' OR auth.role() = 'authenticated');
+  USING (true)
+  WITH CHECK (true);
 
 
 -- ----------------------------------------------------------
@@ -224,12 +237,20 @@ CREATE TABLE IF NOT EXISTS tasks (
   created_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()) NOT NULL
 );
 
+GRANT ALL ON tasks TO anon, authenticated, service_role;
+
 ALTER TABLE tasks ENABLE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS "Public read tasks" ON tasks;
 CREATE POLICY "Public read tasks"
   ON tasks FOR SELECT
   USING (true);
+
+DROP POLICY IF EXISTS "Allow manage tasks" ON tasks;
+CREATE POLICY "Allow manage tasks"
+  ON tasks FOR ALL
+  USING (true)
+  WITH CHECK (true);
 
 -- Populate default tasks if empty
 INSERT INTO tasks (id, name, description, x_account, x_url, verification_type, sort_order) VALUES
@@ -253,6 +274,8 @@ CREATE TABLE IF NOT EXISTS task_verifications (
 CREATE INDEX IF NOT EXISTS idx_task_verifications_x_id ON task_verifications(x_id);
 CREATE INDEX IF NOT EXISTS idx_task_verifications_user_id ON task_verifications(user_id);
 
+GRANT ALL ON task_verifications TO anon, authenticated, service_role;
+
 ALTER TABLE task_verifications ENABLE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS "Public read task_verifications" ON task_verifications;
@@ -260,7 +283,9 @@ CREATE POLICY "Public read task_verifications"
   ON task_verifications FOR SELECT
   USING (true);
 
+DROP POLICY IF EXISTS "Allow manage task_verifications" ON task_verifications;
 DROP POLICY IF EXISTS "Service role manage task_verifications" ON task_verifications;
-CREATE POLICY "Service role manage task_verifications"
+CREATE POLICY "Allow manage task_verifications"
   ON task_verifications FOR ALL
-  USING (auth.role() = 'service_role' OR auth.role() = 'authenticated');
+  USING (true)
+  WITH CHECK (true);

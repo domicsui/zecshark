@@ -102,18 +102,20 @@ router.get('/tasks', async (req, res) => {
       };
     }
 
-    // Fetch existing application if submitted
-    const appRes = await db.execute({
-      sql: 'SELECT * FROM applications WHERE user_id = ? OR (x_id IS NOT NULL AND x_id = ?)',
-      args: [user.id, connectedX ? connectedX.xId : '']
-    });
-    const application = appRes.rows.length > 0 ? {
-      applicationCode: appRes.rows[0].application_code,
-      status: appRes.rows[0].status,
-      walletAddress: appRes.rows[0].wallet_address,
-      xUsername: appRes.rows[0].x_username,
-      createdAt: appRes.rows[0].created_at
-    } : null;
+    // Fetch existing application if submitted (Supabase First)
+    let application = null;
+    if (connectedX?.xId) {
+      application = await supabaseService.getApplicationByXId(connectedX.xId);
+    }
+    if (!application) {
+      const appRes = await db.execute({
+        sql: 'SELECT * FROM applications WHERE user_id = ? OR (x_id IS NOT NULL AND x_id = ?)',
+        args: [user.id, connectedX ? connectedX.xId : '']
+      });
+      if (appRes.rows.length > 0) {
+        application = supabaseService.formatApplication(appRes.rows[0]);
+      }
+    }
 
     // Determine sequential state for each task:
     // LOCKED, READY, VERIFYING, VERIFIED, FAILED
@@ -524,61 +526,67 @@ router.post('/submit', submitLimiter, async (req, res) => {
       });
     }
 
-    // 5. Check duplicate registration (one X account can only register once!)
-    const existingAppRes = await db.execute({
-      sql: 'SELECT * FROM applications WHERE x_id = ? OR user_id = ?',
-      args: [userX.x_id, user.id]
-    });
+    // 5. Check duplicate registration (one X account can only register once - Supabase First)
+    let existingApp = null;
+    if (userX?.x_id) {
+      existingApp = await supabaseService.getApplicationByXId(userX.x_id);
+    }
 
-    if (existingAppRes.rows.length > 0) {
-      const existing = existingAppRes.rows[0];
-      const currentCount = await getRegisteredUsersCount();
+    if (!existingApp) {
+      const existingAppRes = await db.execute({
+        sql: 'SELECT * FROM applications WHERE x_id = ? OR user_id = ?',
+        args: [userX.x_id, user.id]
+      });
+      if (existingAppRes.rows.length > 0) {
+        existingApp = supabaseService.formatApplication(existingAppRes.rows[0]);
+      }
+    }
+
+    if (existingApp) {
+      const metrics = await supabaseService.getApplicationMetrics();
       return res.json({
         success: true,
         alreadyRegistered: true,
         message: 'You have already submitted your waitlist application.',
-        application: {
-          applicationCode: existing.application_code,
-          status: existing.status,
-          walletAddress: existing.wallet_address,
-          xUsername: existing.x_username,
-          createdAt: existing.created_at
-        },
-        registeredUsers: currentCount
+        application: existingApp,
+        registeredUsers: metrics.totalRegisteredUsers
       });
     }
 
-    // 6. ATOMIC APPLICATION REGISTRATION & COUNT INCREMENT
+    // 6. ATOMIC APPLICATION REGISTRATION (Supabase Persistence)
     const randomSuffix = crypto.randomBytes(3).toString('hex').toUpperCase();
     const appCode = `#ZK-${randomSuffix}`;
 
-    await db.execute({
-      sql: `
-        INSERT INTO applications (application_code, user_id, x_id, x_username, wallet_address, status)
-        VALUES (?, ?, ?, ?, ?, 'PENDING')
-      `,
-      args: [appCode, user.id, userX.x_id, userX.x_username, cleanWallet]
+    const saveRes = await supabaseService.saveApplication({
+      applicationCode: appCode,
+      userId: user.id,
+      xId: userX.x_id,
+      xUsername: userX.x_username,
+      walletAddress: cleanWallet,
+      status: 'PENDING'
     });
 
-    const newCount = await getRegisteredUsersCount();
-    statsEvents.emit('update', newCount);
+    if (!saveRes.success) {
+      console.error('[Waitlist Submit Error] Application save failed:', saveRes.error);
+      return res.status(500).json({
+        success: false,
+        error: saveRes.error || 'Failed to save application to Supabase database.'
+      });
+    }
+
+    const metrics = await supabaseService.getApplicationMetrics();
+    statsEvents.emit('update', metrics.totalRegisteredUsers);
 
     res.json({
       success: true,
-      alreadyRegistered: false,
-      message: 'APPLICATION COMPLETED ✓',
-      application: {
-        applicationCode: appCode,
-        status: 'PENDING',
-        walletAddress: cleanWallet,
-        xUsername: userX.x_username,
-        createdAt: new Date().toISOString()
-      },
-      registeredUsers: newCount
+      alreadyRegistered: saveRes.alreadyRegistered || false,
+      message: saveRes.alreadyRegistered ? 'Application record retrieved.' : 'APPLICATION COMPLETED ✓',
+      application: saveRes.application,
+      registeredUsers: metrics.totalRegisteredUsers
     });
   } catch (err) {
     console.error('Error submitting waitlist application:', err);
-    res.status(500).json({ success: false, error: 'Database transaction error while submitting application.' });
+    res.status(500).json({ success: false, error: 'Database transaction error while submitting application: ' + err.message });
   }
 });
 

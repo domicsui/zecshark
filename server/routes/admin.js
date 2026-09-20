@@ -84,17 +84,8 @@ router.get('/me', requireAdmin, (req, res) => {
 
 router.get('/metrics', requireAdmin, async (req, res) => {
   try {
-    const totalRegistered = await getRegisteredUsersCount();
-
-    const completedRes = await db.execute(`
-      SELECT COUNT(*) as count FROM applications WHERE status != 'REJECTED'
-    `);
-    const pendingRes = await db.execute(`
-      SELECT COUNT(*) as count FROM applications WHERE status = 'PENDING'
-    `);
-    const eligibleRes = await db.execute(`
-      SELECT COUNT(*) as count FROM eligible_wallets
-    `);
+    // Application & User Counts from Supabase (Source of Truth)
+    const appMetrics = await supabaseService.getApplicationMetrics();
 
     // Settings from Supabase (Source of Truth)
     const settings = await supabaseService.getSettings();
@@ -103,10 +94,10 @@ router.get('/metrics', requireAdmin, async (req, res) => {
     res.json({
       success: true,
       metrics: {
-        totalRegisteredUsers: totalRegistered,
-        completedApplications: Number(completedRes.rows[0].count),
-        pendingApplications: Number(pendingRes.rows[0].count),
-        eligibleWallets: Number(eligibleRes.rows[0].count)
+        totalRegisteredUsers: appMetrics.totalRegisteredUsers,
+        completedApplications: appMetrics.completedApplications,
+        pendingApplications: appMetrics.pendingApplications,
+        eligibleWallets: appMetrics.eligibleWallets
       },
       settings,
       supabaseStatus
@@ -293,49 +284,19 @@ router.post('/tasks/reorder', requireAdmin, async (req, res) => {
 router.get('/applications', requireAdmin, async (req, res) => {
   try {
     const { search, status, page = 1, limit = 50 } = req.query;
-    const offset = (Number(page) - 1) * Number(limit);
-
-    let query = `
-      SELECT a.*, 
-        (SELECT COUNT(*) FROM task_verifications tv WHERE tv.user_id = a.user_id AND tv.status = 'VERIFIED') as completed_tasks_count,
-        (SELECT COUNT(*) FROM tasks WHERE is_archived = 0 AND is_enabled = 1) as total_tasks_count,
-        CASE WHEN ew.id IS NOT NULL THEN 1 ELSE 0 END as is_wallet_eligible
-      FROM applications a
-      LEFT JOIN eligible_wallets ew ON LOWER(ew.wallet_address) = LOWER(a.wallet_address)
-      WHERE 1=1
-    `;
-    const args = [];
-
-    if (status && status !== 'ALL') {
-      if (status === 'ELIGIBLE') {
-        query += ' AND ew.id IS NOT NULL ';
-      } else if (status === 'NOT ELIGIBLE') {
-        query += ' AND ew.id IS NULL ';
-      } else {
-        query += ' AND a.status = ? ';
-        args.push(status);
-      }
-    }
-
-    if (search) {
-      query += ' AND (a.x_username LIKE ? OR a.x_id LIKE ? OR a.wallet_address LIKE ? OR a.application_code LIKE ?) ';
-      const s = `%${search}%`;
-      args.push(s, s, s, s);
-    }
-
-    query += ' ORDER BY a.created_at DESC LIMIT ? OFFSET ? ';
-    args.push(Number(limit), offset);
-
-    const appsRes = await db.execute({ sql: query, args });
-
-    // Total count for pagination
-    const totalCountRes = await db.execute('SELECT COUNT(*) as total FROM applications');
+    const result = await supabaseService.getApplications({
+      search,
+      status,
+      page: Number(page) || 1,
+      limit: Number(limit) || 50
+    });
 
     res.json({
       success: true,
-      applications: appsRes.rows,
-      total: Number(totalCountRes.rows[0].total),
-      page: Number(page)
+      applications: result.applications,
+      total: result.total,
+      page: result.page,
+      source: result.source
     });
   } catch (err) {
     console.error('Error fetching applications:', err);
@@ -352,18 +313,19 @@ router.put('/applications/:id/status', requireAdmin, async (req, res) => {
       return res.status(400).json({ success: false, error: 'Invalid application status.' });
     }
 
-    await db.execute({
-      sql: 'UPDATE applications SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
-      args: [status, appId]
-    });
+    const updateRes = await supabaseService.updateApplicationStatus(appId, status);
+    if (!updateRes.success) {
+      return res.status(500).json({ success: false, error: updateRes.error || 'Failed to update application status.' });
+    }
 
     const newRegisteredCount = await getRegisteredUsersCount();
     statsEvents.emit('update', newRegisteredCount);
 
     await logAudit(req.admin.username, 'APPLICATION_STATUS_CHANGE', `Application #${appId}`, { newStatus: status });
 
-    res.json({ success: true, message: `Application status changed to ${status}.` });
+    res.json({ success: true, message: `Application status changed to ${status}.`, source: updateRes.source });
   } catch (err) {
+    console.error('Error updating application status:', err);
     res.status(500).json({ success: false, error: 'Failed to update application status.' });
   }
 });
@@ -563,24 +525,20 @@ router.get('/wallets/export-csv', requireAdmin, async (req, res) => {
 // CSV Export for Completed Waitlist Applications (The CSV Workflow)
 router.get('/applications/export-csv', requireAdmin, async (req, res) => {
   try {
-    const appsRes = await db.execute(`
-      SELECT application_code, x_username, x_id, wallet_address, status, created_at 
-      FROM applications 
-      WHERE status != 'REJECTED'
-      ORDER BY id ASC
-    `);
+    const apps = await supabaseService.getApplicationsForExport();
 
     let csv = 'wallet_address,x_username,x_id,application_code,status,created_at\r\n';
-    for (const a of appsRes.rows) {
-      csv += `"${a.wallet_address}","${a.x_username}","${a.x_id}","${a.application_code}","${a.status}","${a.created_at}"\r\n`;
+    for (const a of apps) {
+      csv += `"${a.wallet_address || a.walletAddress || ''}","${a.x_username || a.xUsername || ''}","${a.x_id || a.xId || ''}","${a.application_code || a.applicationCode || ''}","${a.status || ''}","${a.created_at || a.createdAt || ''}"\r\n`;
     }
 
-    await logAudit(req.admin.username, 'CSV_EXPORTED', 'Waitlist Applications', { rows: appsRes.rows.length });
+    await logAudit(req.admin.username, 'CSV_EXPORTED', 'Waitlist Applications', { rows: apps.length });
 
     res.setHeader('Content-Type', 'text/csv');
     res.setHeader('Content-Disposition', 'attachment; filename="zeckshark_waitlist_wallets.csv"');
     res.send(csv);
   } catch (err) {
+    console.error('Error exporting waitlist CSV:', err);
     res.status(500).json({ success: false, error: 'Failed to export waitlist CSV.' });
   }
 });

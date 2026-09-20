@@ -174,9 +174,31 @@ export default function AdminPage() {
   }, [token, appsSearch, appsStatusFilter, walletsSearch]);
 
   useEffect(() => {
-    if (token) {
-      loadAdminData();
-    }
+    if (!token) return;
+
+    loadAdminData();
+
+    const handleVisibilityOrFocus = () => {
+      if (document.visibilityState === 'visible') {
+        loadAdminData();
+      }
+    };
+
+    window.addEventListener('focus', handleVisibilityOrFocus);
+    document.addEventListener('visibilitychange', handleVisibilityOrFocus);
+
+    // Periodic auto-refresh every 20s while tab is active
+    const interval = setInterval(() => {
+      if (document.visibilityState === 'visible') {
+        loadAdminData();
+      }
+    }, 20000);
+
+    return () => {
+      window.removeEventListener('focus', handleVisibilityOrFocus);
+      document.removeEventListener('visibilitychange', handleVisibilityOrFocus);
+      clearInterval(interval);
+    };
   }, [token, loadAdminData]);
 
   const showNotify = (type, text) => {
@@ -1129,50 +1151,60 @@ export default function AdminPage() {
                     </td>
                   </tr>
                 ) : (
-                  applications.map(app => (
-                    <tr key={app.id} className="hover:bg-black/30">
-                      <td className="p-3 font-pixel text-[11px] text-[#FF8800]">
-                        {app.application_code}
-                      </td>
-                      <td className="p-3 text-white">
-                        @{app.x_username}
-                      </td>
-                      <td className="p-3">
-                        <span className="bg-[#181A25] px-2 py-0.5 border border-black text-[#10B981] font-bold">
-                          {app.completed_tasks_count}/{app.total_tasks_count}
-                        </span>
-                      </td>
-                      <td className="p-3 text-zinc-300">
-                        {app.wallet_address.substring(0, 8)}...{app.wallet_address.substring(app.wallet_address.length - 6)}
-                      </td>
-                      <td className="p-3">
-                        {app.is_wallet_eligible ? (
-                          <span className="text-[#10B981] font-bold">✓ YES</span>
-                        ) : (
-                          <span className="text-zinc-500">NO</span>
-                        )}
-                      </td>
-                      <td className="p-3">
-                        <select
-                          value={app.status}
-                          onChange={(e) => handleUpdateAppStatus(app.id, e.target.value)}
-                          className="bg-black border border-black text-[11px] px-2 py-1 text-[#FFC107] focus:outline-none"
-                        >
-                          <option value="PENDING">PENDING</option>
-                          <option value="COMPLETED">COMPLETED</option>
-                          <option value="REJECTED">REJECTED</option>
-                        </select>
-                      </td>
-                      <td className="p-3 text-right">
-                        <button
-                          onClick={() => setAppDetailModal(app)}
-                          className="font-pixel text-[9px] px-2 py-1 bg-[#1E202E] border border-black text-white hover:bg-[#2B2D3F]"
-                        >
-                          INSPECT
-                        </button>
-                      </td>
-                    </tr>
-                  ))
+                  applications.map(app => {
+                    const appId = app.id || app.application_code;
+                    const wallet = app.wallet_address || app.walletAddress || '';
+                    const shortWallet = wallet.length > 14
+                      ? `${wallet.substring(0, 8)}...${wallet.substring(wallet.length - 6)}`
+                      : (wallet || 'N/A');
+                    const completedTasks = app.completed_tasks_count !== undefined ? app.completed_tasks_count : 5;
+                    const totalTasks = app.total_tasks_count !== undefined ? app.total_tasks_count : 5;
+
+                    return (
+                      <tr key={appId} className="hover:bg-black/30">
+                        <td className="p-3 font-pixel text-[11px] text-[#FF8800]">
+                          {app.application_code || app.applicationCode}
+                        </td>
+                        <td className="p-3 text-white">
+                          @{app.x_username || app.xUsername}
+                        </td>
+                        <td className="p-3">
+                          <span className="bg-[#181A25] px-2 py-0.5 border border-black text-[#10B981] font-bold">
+                            {completedTasks}/{totalTasks}
+                          </span>
+                        </td>
+                        <td className="p-3 text-zinc-300">
+                          {shortWallet}
+                        </td>
+                        <td className="p-3">
+                          {app.is_wallet_eligible ? (
+                            <span className="text-[#10B981] font-bold">✓ YES</span>
+                          ) : (
+                            <span className="text-zinc-500">NO</span>
+                          )}
+                        </td>
+                        <td className="p-3">
+                          <select
+                            value={app.status}
+                            onChange={(e) => handleUpdateAppStatus(appId, e.target.value)}
+                            className="bg-black border border-black text-[11px] px-2 py-1 text-[#FFC107] focus:outline-none"
+                          >
+                            <option value="PENDING">PENDING</option>
+                            <option value="COMPLETED">COMPLETED</option>
+                            <option value="REJECTED">REJECTED</option>
+                          </select>
+                        </td>
+                        <td className="p-3 text-right">
+                          <button
+                            onClick={() => setAppDetailModal(app)}
+                            className="font-pixel text-[9px] px-2 py-1 bg-[#1E202E] border border-black text-white hover:bg-[#2B2D3F]"
+                          >
+                            INSPECT
+                          </button>
+                        </td>
+                      </tr>
+                    );
+                  })
                 )}
               </tbody>
             </table>
