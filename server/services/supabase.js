@@ -150,34 +150,67 @@ async function updateSettings(updates) {
 
   if (isConfigured && supabase) {
     try {
-      // 1. Update canonical settings table (id = 1)
-      const { data, error } = await supabase
+      // 1. Direct update for canonical settings table (id = 1)
+      let { data, error } = await supabase
         .from('settings')
-        .upsert({ id: 1, ...normalized })
+        .update(normalized)
+        .eq('id', 1)
         .select()
         .maybeSingle();
 
+      // If row id = 1 didn't exist yet, insert it
+      if (!error && !data) {
+        const insertRes = await supabase
+          .from('settings')
+          .insert({ id: 1, ...normalized })
+          .select()
+          .maybeSingle();
+        data = insertRes.data;
+        error = insertRes.error;
+      }
+
       if (error) {
         console.error(`[Supabase Error] UPDATE settings failed: ${error.message} (Code: ${error.code})`);
-        
-        // Also attempt system_settings key-value update if exists
-        for (const [key, val] of Object.entries(normalized)) {
-          if (key === 'updated_at' || key === 'id') continue;
-          await supabase.from('system_settings').upsert({
-            key,
-            value: String(val),
-            updated_at: new Date().toISOString()
-          });
+
+        // Check fallback key-value table
+        try {
+          const kvRows = Object.entries(normalized)
+            .filter(([k]) => k !== 'updated_at' && k !== 'id')
+            .map(([key, value]) => ({ key, value: String(value), updated_at: new Date().toISOString() }));
+
+          const kvUpsert = await supabase.from('system_settings').upsert(kvRows);
+          if (!kvUpsert.error) {
+            console.log('[Supabase] Fallback system_settings updated successfully');
+            const current = await getSettings();
+            return {
+              success: true,
+              settings: current,
+              source: 'supabase_kv'
+            };
+          }
+        } catch (kvErr) {
+          // ignore kv fallback error
         }
 
         return {
           success: false,
-          error: `Supabase error: ${error.message}. Check RLS policies or permissions.`,
+          error: `Supabase error: ${error.message}. Please run the updated supabase_schema.sql in your Supabase SQL Editor or configure SUPABASE_SERVICE_ROLE_KEY in Vercel.`,
           source: 'supabase_error'
         };
       }
 
       console.log(`[Supabase] UPDATE settings succeeded: ${JSON.stringify(normalized)}`);
+
+      // Asynchronously sync system_settings in background (non-blocking)
+      (async () => {
+        try {
+          const kvRows = Object.entries(normalized)
+            .filter(([k]) => k !== 'updated_at' && k !== 'id')
+            .map(([key, value]) => ({ key, value: String(value), updated_at: new Date().toISOString() }));
+          await supabase.from('system_settings').upsert(kvRows);
+        } catch (_) {}
+      })();
+
       return {
         success: true,
         settings: formatSettings(data || normalized, 'supabase'),

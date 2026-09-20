@@ -60,20 +60,50 @@ ON CONFLICT (id) DO NOTHING;
 -- Enable RLS for settings
 ALTER TABLE settings ENABLE ROW LEVEL SECURITY;
 
+-- Explicit Table Grants for PostgreSQL Roles
+GRANT SELECT, INSERT, UPDATE ON settings TO anon;
+GRANT ALL ON settings TO authenticated;
+GRANT ALL ON settings TO service_role;
+
+-- 1. Public SELECT Policy: Anyone can read settings
 DROP POLICY IF EXISTS "Public read settings" ON settings;
 CREATE POLICY "Public read settings"
   ON settings FOR SELECT
   USING (true);
 
+-- 2. Service Role Policy: Full backend bypass/access
 DROP POLICY IF EXISTS "Service role update settings" ON settings;
-CREATE POLICY "Service role update settings"
-  ON settings FOR UPDATE
-  USING (auth.role() = 'service_role' OR auth.role() = 'authenticated');
-
 DROP POLICY IF EXISTS "Service role insert settings" ON settings;
-CREATE POLICY "Service role insert settings"
+DROP POLICY IF EXISTS "Service role manage settings" ON settings;
+CREATE POLICY "Service role manage settings"
+  ON settings FOR ALL
+  TO service_role
+  USING (true)
+  WITH CHECK (true);
+
+-- 3. Authenticated Policy
+DROP POLICY IF EXISTS "Authenticated manage settings" ON settings;
+CREATE POLICY "Authenticated manage settings"
+  ON settings FOR ALL
+  TO authenticated
+  USING (true)
+  WITH CHECK (true);
+
+-- 4. Server-Side Custom Auth Policy:
+-- Allows Express backend (connecting via SUPABASE_ANON_KEY or SUPABASE_KEY)
+-- to update canonical settings strictly for row id = 1
+DROP POLICY IF EXISTS "Allow update settings row 1" ON settings;
+CREATE POLICY "Allow update settings row 1"
+  ON settings FOR UPDATE
+  TO anon
+  USING (id = 1)
+  WITH CHECK (id = 1);
+
+DROP POLICY IF EXISTS "Allow insert settings row 1" ON settings;
+CREATE POLICY "Allow insert settings row 1"
   ON settings FOR INSERT
-  WITH CHECK (auth.role() = 'service_role' OR auth.role() = 'authenticated');
+  TO anon
+  WITH CHECK (id = 1);
 
 
 -- ----------------------------------------------------------
@@ -87,15 +117,27 @@ CREATE TABLE IF NOT EXISTS system_settings (
 
 ALTER TABLE system_settings ENABLE ROW LEVEL SECURITY;
 
+GRANT ALL ON system_settings TO anon, authenticated, service_role;
+
 DROP POLICY IF EXISTS "Public read system_settings" ON system_settings;
 CREATE POLICY "Public read system_settings"
   ON system_settings FOR SELECT
   USING (true);
 
 DROP POLICY IF EXISTS "Service role update system_settings" ON system_settings;
-CREATE POLICY "Service role update system_settings"
+DROP POLICY IF EXISTS "Service role manage system_settings" ON system_settings;
+CREATE POLICY "Service role manage system_settings"
   ON system_settings FOR ALL
-  USING (auth.role() = 'service_role' OR auth.role() = 'authenticated');
+  TO service_role
+  USING (true)
+  WITH CHECK (true);
+
+DROP POLICY IF EXISTS "Allow anon manage system_settings" ON system_settings;
+CREATE POLICY "Allow anon manage system_settings"
+  ON system_settings FOR ALL
+  TO anon
+  USING (true)
+  WITH CHECK (true);
 
 INSERT INTO system_settings (key, value) VALUES
   ('waitlist_enabled', 'true'),

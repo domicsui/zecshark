@@ -57,6 +57,12 @@ export default function AdminPage() {
   const [notification, setNotification] = useState(null); // { type: 'success' | 'error' | 'warning', text: '' }
   const [supabaseStatus, setSupabaseStatus] = useState(null);
   const [savingSetting, setSavingSetting] = useState(null); // Tracks key currently being updated
+  const [buttonStates, setButtonStates] = useState({
+    waitlist_enabled: 'idle',
+    applications_open: 'idle',
+    wallet_checker_enabled: 'idle'
+  });
+  const [savingGeneralSettings, setSavingGeneralSettings] = useState(false);
 
   // Modals & Form states
   const [taskModal, setTaskModal] = useState(null); // null | { mode: 'create' | 'edit', task: {} }
@@ -180,37 +186,99 @@ export default function AdminPage() {
 
   // Quick Global Switch Toggle (Connected to Supabase Source of Truth)
   const handleToggleSetting = async (key, currentValue) => {
-    if (savingSetting) return;
+    // If button is currently saving or confirming, prevent re-entry
+    if (buttonStates[key] === 'saving' || buttonStates[key] === 'success') return;
     playPixelClick();
+
+    // 1. Capture exact previous boolean state for reliable rollback
+    const prevValue = currentValue !== 'false' && currentValue !== false;
+    const nextValue = !prevValue;
+    const nextValueStr = nextValue ? 'true' : 'false';
+
+    // 2. Transition button state to 'saving'
+    setButtonStates(prev => ({ ...prev, [key]: 'saving' }));
     setSavingSetting(key);
 
-    const isCurrentlyOn = currentValue !== 'false' && currentValue !== false;
-    const newValue = isCurrentlyOn ? 'false' : 'true';
+    // Optimistically update visual UI switch
+    setGlobalSettings(prev => ({
+      ...prev,
+      [key]: nextValueStr,
+      ...(key === 'applications_open' ? { applications_enabled: nextValueStr } : {})
+    }));
 
     try {
+      // 3. Send async update request to server
       const res = await fetchApi('/admin/settings', {
         method: 'POST',
-        body: JSON.stringify({ [key]: newValue })
+        body: JSON.stringify({ [key]: nextValueStr })
       });
 
       if (res.ok && res.data?.success) {
-        setGlobalSettings(prev => ({ ...prev, [key]: newValue }));
-        if (res.data.warning) {
-          showNotify('warning', res.data.warning);
-        } else {
-          showNotify('success', `✓ ${key.toUpperCase().replace(/_/g, ' ')}: ${newValue === 'true' ? 'ON' : 'OFF'}`);
+        // 4. Success flow: Confirm database update
+        playQuestVerified();
+        setButtonStates(prev => ({ ...prev, [key]: 'success' }));
+
+        const label = key.toUpperCase().replace(/_/g, ' ');
+        const stateWord = (key === 'applications_open' || key === 'applications_enabled')
+          ? (nextValue ? 'OPEN' : 'CLOSED')
+          : (nextValue ? 'ON' : 'OFF');
+
+        showNotify('success', `✓ ${label}: ${stateWord} (Confirmed in database)`);
+
+        // 5. Re-fetch current settings from Supabase to confirm persisted value
+        const verifyRes = await fetchApi('/admin/settings');
+        if (verifyRes.ok && verifyRes.data?.settings) {
+          setGlobalSettings(verifyRes.data.settings);
+          if (verifyRes.data.supabaseStatus) {
+            setSupabaseStatus(verifyRes.data.supabaseStatus);
+          }
         }
-        await loadAdminData();
+
+        // Return button state to 'idle' after brief confirmation
+        setTimeout(() => {
+          setButtonStates(prev => ({ ...prev, [key]: 'idle' }));
+        }, 1200);
+
       } else {
+        // 6. Error flow: Stop saving, show error, and rollback visual state
         playErrorBeep();
-        showNotify('error', res.data?.error || `Failed to update ${key} in database.`);
-        // Rollback UI to actual database value
+        const errMsg = res.data?.error || `Failed to update ${key} in database.`;
+        showNotify('error', errMsg);
+
+        setButtonStates(prev => ({ ...prev, [key]: 'error' }));
+
+        // Rollback visual switch to previous confirmed database value
+        setGlobalSettings(prev => ({
+          ...prev,
+          [key]: prevValue ? 'true' : 'false',
+          ...(key === 'applications_open' ? { applications_enabled: prevValue ? 'true' : 'false' } : {})
+        }));
+
+        // Re-sync authoritative data from server
         await loadAdminData();
+
+        setTimeout(() => {
+          setButtonStates(prev => ({ ...prev, [key]: 'idle' }));
+        }, 2000);
       }
     } catch (err) {
+      // 7. Network error flow
       playErrorBeep();
-      showNotify('error', `Network error while updating ${key}.`);
+      showNotify('error', `Network error while updating ${key}: ${err.message}`);
+      setButtonStates(prev => ({ ...prev, [key]: 'error' }));
+
+      // Rollback visual switch
+      setGlobalSettings(prev => ({
+        ...prev,
+        [key]: prevValue ? 'true' : 'false',
+        ...(key === 'applications_open' ? { applications_enabled: prevValue ? 'true' : 'false' } : {})
+      }));
+
       await loadAdminData();
+
+      setTimeout(() => {
+        setButtonStates(prev => ({ ...prev, [key]: 'idle' }));
+      }, 2000);
     } finally {
       setSavingSetting(null);
     }
@@ -368,18 +436,28 @@ export default function AdminPage() {
   // Save Settings
   const handleSaveSettings = async (e) => {
     e.preventDefault();
+    if (savingGeneralSettings) return;
     playPixelClick();
-    const res = await fetchApi('/admin/settings', {
-      method: 'POST',
-      body: JSON.stringify(globalSettings)
-    });
-    if (res.ok) {
-      playQuestVerified();
-      showNotify('success', 'Global settings saved.');
-      loadAdminData();
-    } else {
+    setSavingGeneralSettings(true);
+
+    try {
+      const res = await fetchApi('/admin/settings', {
+        method: 'POST',
+        body: JSON.stringify(globalSettings)
+      });
+      if (res.ok && res.data?.success) {
+        playQuestVerified();
+        showNotify('success', '✓ Global settings saved to Supabase.');
+        await loadAdminData();
+      } else {
+        playErrorBeep();
+        showNotify('error', res.data?.error || 'Failed to save settings to database.');
+      }
+    } catch (err) {
       playErrorBeep();
-      showNotify('error', 'Failed to save settings.');
+      showNotify('error', `Network error while saving settings: ${err.message}`);
+    } finally {
+      setSavingGeneralSettings(false);
     }
   };
 
@@ -645,18 +723,30 @@ export default function AdminPage() {
                   <span className="text-xs text-zinc-400">Enable or pause waitlist</span>
                 </div>
                 <button
-                  disabled={savingSetting === 'waitlist_enabled'}
+                  disabled={buttonStates.waitlist_enabled === 'saving' || buttonStates.waitlist_enabled === 'success' || (!metrics && loadingData)}
                   onClick={() => handleToggleSetting('waitlist_enabled', globalSettings.waitlist_enabled)}
                   className={`font-pixel text-xs px-3 py-1.5 border-2 border-black transition-all ${
-                    savingSetting === 'waitlist_enabled'
-                      ? 'bg-zinc-700 text-zinc-300 animate-pulse cursor-wait'
+                    !metrics && loadingData
+                      ? 'bg-zinc-800 text-zinc-400 cursor-wait'
+                      : buttonStates.waitlist_enabled === 'saving'
+                      ? 'bg-[#FF8800] text-black animate-pulse cursor-wait font-bold shadow-[2px_2px_0px_#000]'
+                      : buttonStates.waitlist_enabled === 'success'
+                      ? 'bg-[#10B981] text-black font-bold shadow-[2px_2px_0px_#000]'
+                      : buttonStates.waitlist_enabled === 'error'
+                      ? 'bg-[#EF4444] text-white font-bold shadow-[2px_2px_0px_#000]'
                       : globalSettings.waitlist_enabled !== 'false'
                       ? 'bg-[#10B981] text-black shadow-[2px_2px_0px_#000] hover:bg-[#20c997]'
                       : 'bg-[#EF4444] text-white shadow-[2px_2px_0px_#000] hover:bg-[#f87171]'
                   }`}
                 >
-                  {savingSetting === 'waitlist_enabled'
+                  {!metrics && loadingData
+                    ? 'LOADING...'
+                    : buttonStates.waitlist_enabled === 'saving'
                     ? 'SAVING...'
+                    : buttonStates.waitlist_enabled === 'success'
+                    ? 'SAVED! ✓'
+                    : buttonStates.waitlist_enabled === 'error'
+                    ? 'FAILED! ✕'
                     : globalSettings.waitlist_enabled !== 'false'
                     ? 'ON'
                     : 'OFF'}
@@ -670,18 +760,30 @@ export default function AdminPage() {
                   <span className="text-xs text-zinc-400">Accepting submissions</span>
                 </div>
                 <button
-                  disabled={savingSetting === 'applications_open' || savingSetting === 'applications_enabled'}
-                  onClick={() => handleToggleSetting('applications_open', globalSettings.applications_open || globalSettings.applications_enabled)}
+                  disabled={buttonStates.applications_open === 'saving' || buttonStates.applications_open === 'success' || (!metrics && loadingData)}
+                  onClick={() => handleToggleSetting('applications_open', globalSettings.applications_open !== undefined ? globalSettings.applications_open : globalSettings.applications_enabled)}
                   className={`font-pixel text-xs px-3 py-1.5 border-2 border-black transition-all ${
-                    savingSetting === 'applications_open' || savingSetting === 'applications_enabled'
-                      ? 'bg-zinc-700 text-zinc-300 animate-pulse cursor-wait'
+                    !metrics && loadingData
+                      ? 'bg-zinc-800 text-zinc-400 cursor-wait'
+                      : buttonStates.applications_open === 'saving'
+                      ? 'bg-[#FF8800] text-black animate-pulse cursor-wait font-bold shadow-[2px_2px_0px_#000]'
+                      : buttonStates.applications_open === 'success'
+                      ? 'bg-[#10B981] text-black font-bold shadow-[2px_2px_0px_#000]'
+                      : buttonStates.applications_open === 'error'
+                      ? 'bg-[#EF4444] text-white font-bold shadow-[2px_2px_0px_#000]'
                       : (globalSettings.applications_open !== 'false' && globalSettings.applications_enabled !== 'false')
                       ? 'bg-[#10B981] text-black shadow-[2px_2px_0px_#000] hover:bg-[#20c997]'
                       : 'bg-[#EF4444] text-white shadow-[2px_2px_0px_#000] hover:bg-[#f87171]'
                   }`}
                 >
-                  {savingSetting === 'applications_open' || savingSetting === 'applications_enabled'
+                  {!metrics && loadingData
+                    ? 'LOADING...'
+                    : buttonStates.applications_open === 'saving'
                     ? 'SAVING...'
+                    : buttonStates.applications_open === 'success'
+                    ? 'SAVED! ✓'
+                    : buttonStates.applications_open === 'error'
+                    ? 'FAILED! ✕'
                     : (globalSettings.applications_open !== 'false' && globalSettings.applications_enabled !== 'false')
                     ? 'OPEN'
                     : 'CLOSED'}
@@ -695,18 +797,30 @@ export default function AdminPage() {
                   <span className="text-xs text-zinc-400">Public checker access</span>
                 </div>
                 <button
-                  disabled={savingSetting === 'wallet_checker_enabled'}
+                  disabled={buttonStates.wallet_checker_enabled === 'saving' || buttonStates.wallet_checker_enabled === 'success' || (!metrics && loadingData)}
                   onClick={() => handleToggleSetting('wallet_checker_enabled', globalSettings.wallet_checker_enabled)}
                   className={`font-pixel text-xs px-3 py-1.5 border-2 border-black transition-all ${
-                    savingSetting === 'wallet_checker_enabled'
-                      ? 'bg-zinc-700 text-zinc-300 animate-pulse cursor-wait'
+                    !metrics && loadingData
+                      ? 'bg-zinc-800 text-zinc-400 cursor-wait'
+                      : buttonStates.wallet_checker_enabled === 'saving'
+                      ? 'bg-[#FF8800] text-black animate-pulse cursor-wait font-bold shadow-[2px_2px_0px_#000]'
+                      : buttonStates.wallet_checker_enabled === 'success'
+                      ? 'bg-[#10B981] text-black font-bold shadow-[2px_2px_0px_#000]'
+                      : buttonStates.wallet_checker_enabled === 'error'
+                      ? 'bg-[#EF4444] text-white font-bold shadow-[2px_2px_0px_#000]'
                       : globalSettings.wallet_checker_enabled !== 'false'
                       ? 'bg-[#10B981] text-black shadow-[2px_2px_0px_#000] hover:bg-[#20c997]'
                       : 'bg-[#EF4444] text-white shadow-[2px_2px_0px_#000] hover:bg-[#f87171]'
                   }`}
                 >
-                  {savingSetting === 'wallet_checker_enabled'
+                  {!metrics && loadingData
+                    ? 'LOADING...'
+                    : buttonStates.wallet_checker_enabled === 'saving'
                     ? 'SAVING...'
+                    : buttonStates.wallet_checker_enabled === 'success'
+                    ? 'SAVED! ✓'
+                    : buttonStates.wallet_checker_enabled === 'error'
+                    ? 'FAILED! ✕'
                     : globalSettings.wallet_checker_enabled !== 'false'
                     ? 'ON'
                     : 'OFF'}
@@ -1359,8 +1473,8 @@ export default function AdminPage() {
               )}
 
               <div className="pt-2">
-                <PixelButton type="submit" variant="primary" size="md">
-                  [ SAVE CONFIGURATION ]
+                <PixelButton type="submit" variant="primary" size="md" disabled={savingGeneralSettings}>
+                  {savingGeneralSettings ? '[ SAVING TO SUPABASE... ]' : '[ SAVE CONFIGURATION ]'}
                 </PixelButton>
               </div>
             </form>
