@@ -5,6 +5,7 @@ const jwt = require('jsonwebtoken');
 const multer = require('multer');
 const { db, getRegisteredUsersCount, logAudit, statsEvents } = require('../db');
 const { requireAdmin, JWT_SECRET } = require('../middleware/auth');
+const supabaseService = require('../services/supabase');
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 * 1024 * 1024 } });
 
@@ -95,12 +96,9 @@ router.get('/metrics', requireAdmin, async (req, res) => {
       SELECT COUNT(*) as count FROM eligible_wallets
     `);
 
-    // Settings
-    const settingsRes = await db.execute('SELECT key, value FROM settings');
-    const settings = {};
-    for (const r of settingsRes.rows) {
-      settings[r.key] = r.value;
-    }
+    // Settings from Supabase (Source of Truth)
+    const settings = await supabaseService.getSettings();
+    const supabaseStatus = await supabaseService.getStatus();
 
     res.json({
       success: true,
@@ -110,7 +108,8 @@ router.get('/metrics', requireAdmin, async (req, res) => {
         pendingApplications: Number(pendingRes.rows[0].count),
         eligibleWallets: Number(eligibleRes.rows[0].count)
       },
-      settings
+      settings,
+      supabaseStatus
     });
   } catch (err) {
     console.error('Error fetching admin metrics:', err);
@@ -120,12 +119,9 @@ router.get('/metrics', requireAdmin, async (req, res) => {
 
 router.get('/settings', requireAdmin, async (req, res) => {
   try {
-    const resSettings = await db.execute('SELECT key, value, updated_at FROM settings');
-    const settings = {};
-    for (const r of resSettings.rows) {
-      settings[r.key] = r.value;
-    }
-    res.json({ success: true, settings });
+    const settings = await supabaseService.getSettings();
+    const supabaseStatus = await supabaseService.getStatus();
+    res.json({ success: true, settings, supabaseStatus });
   } catch (err) {
     res.status(500).json({ success: false, error: 'Failed to fetch settings.' });
   }
@@ -133,38 +129,28 @@ router.get('/settings', requireAdmin, async (req, res) => {
 
 router.post('/settings', requireAdmin, async (req, res) => {
   try {
-    const allowedKeys = [
-      'project_name',
-      'hero_headline',
-      'hero_subheadline',
-      'waitlist_enabled',
-      'applications_open',
-      'wallet_checker_enabled',
-      'x_account_username',
-      'x_account_url',
-      'announcement_url',
-      'x_verification_mode',
-      'x_client_id',
-      'x_bearer_token'
-    ];
-
     const updates = req.body;
-    for (const key of Object.keys(updates)) {
-      if (allowedKeys.includes(key)) {
-        await db.execute({
-          sql: `
-            INSERT INTO settings (key, value, updated_at) 
-            VALUES (?, ?, CURRENT_TIMESTAMP)
-            ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP
-          `,
-          args: [key, String(updates[key])]
-        });
-      }
+    console.log(`[Admin] Settings update requested by @${req.admin.username}:`, updates);
+
+    const result = await supabaseService.updateSettings(updates);
+
+    if (!result.success) {
+      console.error(`[Admin] Settings update failed:`, result.error);
+      return res.status(500).json({
+        success: false,
+        error: result.error || 'Failed to update settings in Supabase.'
+      });
     }
 
     await logAudit(req.admin.username, 'SETTINGS_UPDATE', 'Global Settings', JSON.stringify(updates));
 
-    res.json({ success: true, message: 'Settings saved successfully.' });
+    res.json({
+      success: true,
+      message: 'Settings saved successfully.',
+      warning: result.warning || null,
+      settings: result.settings,
+      source: result.source
+    });
   } catch (err) {
     console.error('Error updating settings:', err);
     res.status(500).json({ success: false, error: 'Failed to update settings.' });

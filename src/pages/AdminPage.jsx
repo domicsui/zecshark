@@ -54,7 +54,9 @@ export default function AdminPage() {
   const [walletsSearch, setWalletsSearch] = useState('');
   const [auditLogs, setAuditLogs] = useState([]);
   const [loadingData, setLoadingData] = useState(false);
-  const [notification, setNotification] = useState(null); // { type: 'success' | 'error', text: '' }
+  const [notification, setNotification] = useState(null); // { type: 'success' | 'error' | 'warning', text: '' }
+  const [supabaseStatus, setSupabaseStatus] = useState(null);
+  const [savingSetting, setSavingSetting] = useState(null); // Tracks key currently being updated
 
   // Modals & Form states
   const [taskModal, setTaskModal] = useState(null); // null | { mode: 'create' | 'edit', task: {} }
@@ -125,11 +127,14 @@ export default function AdminPage() {
     setLoadingData(true);
 
     try {
-      // 1. Metrics & Settings
+      // 1. Metrics & Settings from Supabase
       const metricsRes = await fetchApi('/admin/metrics');
       if (metricsRes.ok && metricsRes.data) {
         setMetrics(metricsRes.data.metrics);
         setGlobalSettings(metricsRes.data.settings || {});
+        if (metricsRes.data.supabaseStatus) {
+          setSupabaseStatus(metricsRes.data.supabaseStatus);
+        }
       }
 
       // 2. Tasks
@@ -173,20 +178,41 @@ export default function AdminPage() {
     setTimeout(() => setNotification(null), 4000);
   };
 
-  // Quick Global Switch Toggle
+  // Quick Global Switch Toggle (Connected to Supabase Source of Truth)
   const handleToggleSetting = async (key, currentValue) => {
+    if (savingSetting) return;
     playPixelClick();
-    const newValue = currentValue === 'true' ? 'false' : 'true';
-    const res = await fetchApi('/admin/settings', {
-      method: 'POST',
-      body: JSON.stringify({ [key]: newValue })
-    });
-    if (res.ok) {
-      setGlobalSettings(prev => ({ ...prev, [key]: newValue }));
-      showNotify('success', `Setting updated: ${key} = ${newValue}`);
-      loadAdminData();
-    } else {
-      showNotify('error', 'Failed to update setting.');
+    setSavingSetting(key);
+
+    const isCurrentlyOn = currentValue !== 'false' && currentValue !== false;
+    const newValue = isCurrentlyOn ? 'false' : 'true';
+
+    try {
+      const res = await fetchApi('/admin/settings', {
+        method: 'POST',
+        body: JSON.stringify({ [key]: newValue })
+      });
+
+      if (res.ok && res.data?.success) {
+        setGlobalSettings(prev => ({ ...prev, [key]: newValue }));
+        if (res.data.warning) {
+          showNotify('warning', res.data.warning);
+        } else {
+          showNotify('success', `✓ ${key.toUpperCase().replace(/_/g, ' ')}: ${newValue === 'true' ? 'ON' : 'OFF'}`);
+        }
+        await loadAdminData();
+      } else {
+        playErrorBeep();
+        showNotify('error', res.data?.error || `Failed to update ${key} in database.`);
+        // Rollback UI to actual database value
+        await loadAdminData();
+      }
+    } catch (err) {
+      playErrorBeep();
+      showNotify('error', `Network error while updating ${key}.`);
+      await loadAdminData();
+    } finally {
+      setSavingSetting(null);
     }
   };
 
@@ -569,6 +595,45 @@ export default function AdminPage() {
 
           </div>
 
+          {/* Supabase Connection Status Banner */}
+          {supabaseStatus && (
+            <div>
+              {supabaseStatus.configured ? (
+                <div className="flex items-center justify-between gap-3 text-xs bg-[#112217] border-2 border-black p-3 shadow-[3px_3px_0px_#000]">
+                  <div className="flex items-center gap-2">
+                    <CheckCircle size={16} className="text-[#10B981]" />
+                    <span className="font-pixel text-[11px] text-[#10B981]">
+                      SUPABASE PERSISTENCE ACTIVE
+                    </span>
+                    <span className="text-zinc-400 font-mono text-[10px]">
+                      ({supabaseStatus.url || 'Cloud Database'} • {supabaseStatus.keyType.toUpperCase()} KEY)
+                    </span>
+                  </div>
+                  <span className="font-pixel text-[9px] bg-[#10B981] text-black px-1.5 py-0.5 font-bold">
+                    CLOUD SYNC
+                  </span>
+                </div>
+              ) : (
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs bg-[#2B1E12] border-2 border-[#FF8800] p-3 shadow-[3px_3px_0px_#000]">
+                  <div className="flex items-center gap-2">
+                    <AlertTriangle size={16} className="text-[#FF8800] shrink-0" />
+                    <div>
+                      <span className="font-pixel text-[10px] text-[#FFC107] block">
+                        SUPABASE NOT CONNECTED (RUNNING ON LOCAL CACHE)
+                      </span>
+                      <span className="text-zinc-300 text-[11px]">
+                        To persist settings permanently across Vercel deployments, configure <strong>SUPABASE_URL</strong> and <strong>SUPABASE_ANON_KEY</strong> in Vercel Environment Variables.
+                      </span>
+                    </div>
+                  </div>
+                  <span className="font-pixel text-[9px] bg-[#FF8800] text-black px-2 py-0.5 font-bold shrink-0 self-start sm:self-center">
+                    EPHEMERAL
+                  </span>
+                </div>
+              )}
+            </div>
+          )}
+
           {/* Quick Global Toggles */}
           <PixelCard title="GLOBAL SYSTEM SWITCHES" badge={<PixelBadge status="READY" text="CONTROLS" />}>
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-6">
@@ -580,14 +645,21 @@ export default function AdminPage() {
                   <span className="text-xs text-zinc-400">Enable or pause waitlist</span>
                 </div>
                 <button
+                  disabled={savingSetting === 'waitlist_enabled'}
                   onClick={() => handleToggleSetting('waitlist_enabled', globalSettings.waitlist_enabled)}
-                  className={`font-pixel text-xs px-3 py-1.5 border-2 border-black ${
-                    globalSettings.waitlist_enabled !== 'false'
-                      ? 'bg-[#10B981] text-black shadow-[2px_2px_0px_#000]'
-                      : 'bg-[#EF4444] text-white shadow-[2px_2px_0px_#000]'
+                  className={`font-pixel text-xs px-3 py-1.5 border-2 border-black transition-all ${
+                    savingSetting === 'waitlist_enabled'
+                      ? 'bg-zinc-700 text-zinc-300 animate-pulse cursor-wait'
+                      : globalSettings.waitlist_enabled !== 'false'
+                      ? 'bg-[#10B981] text-black shadow-[2px_2px_0px_#000] hover:bg-[#20c997]'
+                      : 'bg-[#EF4444] text-white shadow-[2px_2px_0px_#000] hover:bg-[#f87171]'
                   }`}
                 >
-                  {globalSettings.waitlist_enabled !== 'false' ? 'ON' : 'OFF'}
+                  {savingSetting === 'waitlist_enabled'
+                    ? 'SAVING...'
+                    : globalSettings.waitlist_enabled !== 'false'
+                    ? 'ON'
+                    : 'OFF'}
                 </button>
               </div>
 
@@ -598,14 +670,21 @@ export default function AdminPage() {
                   <span className="text-xs text-zinc-400">Accepting submissions</span>
                 </div>
                 <button
-                  onClick={() => handleToggleSetting('applications_open', globalSettings.applications_open)}
-                  className={`font-pixel text-xs px-3 py-1.5 border-2 border-black ${
-                    globalSettings.applications_open !== 'false'
-                      ? 'bg-[#10B981] text-black shadow-[2px_2px_0px_#000]'
-                      : 'bg-[#EF4444] text-white shadow-[2px_2px_0px_#000]'
+                  disabled={savingSetting === 'applications_open' || savingSetting === 'applications_enabled'}
+                  onClick={() => handleToggleSetting('applications_open', globalSettings.applications_open || globalSettings.applications_enabled)}
+                  className={`font-pixel text-xs px-3 py-1.5 border-2 border-black transition-all ${
+                    savingSetting === 'applications_open' || savingSetting === 'applications_enabled'
+                      ? 'bg-zinc-700 text-zinc-300 animate-pulse cursor-wait'
+                      : (globalSettings.applications_open !== 'false' && globalSettings.applications_enabled !== 'false')
+                      ? 'bg-[#10B981] text-black shadow-[2px_2px_0px_#000] hover:bg-[#20c997]'
+                      : 'bg-[#EF4444] text-white shadow-[2px_2px_0px_#000] hover:bg-[#f87171]'
                   }`}
                 >
-                  {globalSettings.applications_open !== 'false' ? 'OPEN' : 'CLOSED'}
+                  {savingSetting === 'applications_open' || savingSetting === 'applications_enabled'
+                    ? 'SAVING...'
+                    : (globalSettings.applications_open !== 'false' && globalSettings.applications_enabled !== 'false')
+                    ? 'OPEN'
+                    : 'CLOSED'}
                 </button>
               </div>
 
@@ -616,14 +695,21 @@ export default function AdminPage() {
                   <span className="text-xs text-zinc-400">Public checker access</span>
                 </div>
                 <button
+                  disabled={savingSetting === 'wallet_checker_enabled'}
                   onClick={() => handleToggleSetting('wallet_checker_enabled', globalSettings.wallet_checker_enabled)}
-                  className={`font-pixel text-xs px-3 py-1.5 border-2 border-black ${
-                    globalSettings.wallet_checker_enabled !== 'false'
-                      ? 'bg-[#10B981] text-black shadow-[2px_2px_0px_#000]'
-                      : 'bg-[#EF4444] text-white shadow-[2px_2px_0px_#000]'
+                  className={`font-pixel text-xs px-3 py-1.5 border-2 border-black transition-all ${
+                    savingSetting === 'wallet_checker_enabled'
+                      ? 'bg-zinc-700 text-zinc-300 animate-pulse cursor-wait'
+                      : globalSettings.wallet_checker_enabled !== 'false'
+                      ? 'bg-[#10B981] text-black shadow-[2px_2px_0px_#000] hover:bg-[#20c997]'
+                      : 'bg-[#EF4444] text-white shadow-[2px_2px_0px_#000] hover:bg-[#f87171]'
                   }`}
                 >
-                  {globalSettings.wallet_checker_enabled !== 'false' ? 'ON' : 'OFF'}
+                  {savingSetting === 'wallet_checker_enabled'
+                    ? 'SAVING...'
+                    : globalSettings.wallet_checker_enabled !== 'false'
+                    ? 'ON'
+                    : 'OFF'}
                 </button>
               </div>
 

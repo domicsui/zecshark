@@ -2,18 +2,31 @@ const express = require('express');
 const router = express.Router();
 const { db } = require('../db');
 const { checkerLimiter } = require('../middleware/rateLimit');
+const supabaseService = require('../services/supabase');
+
+// GET /api/checker/status - Public status check for checker feature toggle
+router.get('/status', async (req, res) => {
+  try {
+    const settings = await supabaseService.getSettings();
+    res.json({
+      success: true,
+      walletCheckerEnabled: settings.isWalletCheckerEnabled,
+      source: settings._source
+    });
+  } catch (err) {
+    console.error('Error fetching checker status:', err);
+    res.status(500).json({ success: false, error: 'Failed to retrieve checker status.' });
+  }
+});
 
 // POST /api/checker/check - Public rate-limited wallet eligibility check
 router.post('/check', checkerLimiter, async (req, res) => {
   try {
     const { walletAddress } = req.body;
 
-    // 1. Verify feature toggle
-    const settingRes = await db.execute({
-      sql: 'SELECT value FROM settings WHERE key = ?',
-      args: ['wallet_checker_enabled']
-    });
-    if (settingRes.rows.length > 0 && settingRes.rows[0].value === 'false') {
+    // 1. Verify feature toggle from Supabase (Source of Truth)
+    const settings = await supabaseService.getSettings();
+    if (!settings.isWalletCheckerEnabled) {
       return res.status(403).json({
         success: false,
         error: 'The Wallet Eligibility Checker is temporarily offline for maintenance.'

@@ -61,6 +61,20 @@ export default function WaitlistPage({ setActivePage }) {
   };
 
   useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const xConnected = params.get('x_connected');
+    const username = params.get('username') || params.get('x_username');
+    const xId = params.get('x_id');
+
+    if (xConnected && username) {
+      if (xId) {
+        localStorage.setItem('zeckshark_x_id', xId);
+      }
+      playQuestVerified();
+      setStatusMessage({ type: 'success', text: `✓ Connected as @${username}` });
+      window.history.replaceState({}, document.title, window.location.pathname);
+    }
+
     loadTasks();
   }, []);
 
@@ -86,8 +100,26 @@ export default function WaitlistPage({ setActivePage }) {
 
       if (res.ok && res.data.success) {
         playQuestVerified();
-        setConnectedX(res.data.connectedX);
-        setStatusMessage({ type: 'success', text: `✓ Connected as @${res.data.connectedX.xUsername}` });
+        const connX = res.data.connectedX;
+        setConnectedX(connX);
+        if (connX?.xId) {
+          localStorage.setItem('zeckshark_x_id', connX.xId);
+        }
+
+        // Immediately update UI tasks so Task 01 is VERIFIED, Task 02 is READY, Progress is >= 1
+        setTasks(prevTasks => {
+          return prevTasks.map((t, idx) => {
+            if (idx === 0) return { ...t, state: 'VERIFIED' };
+            if (idx === 1 && (t.state === 'LOCKED' || t.state === 'READY')) return { ...t, state: 'READY' };
+            return t;
+          });
+        });
+        setProgress(prev => ({
+          ...prev,
+          completed: Math.max(prev.completed, 1)
+        }));
+        setStatusMessage({ type: 'success', text: `✓ Connected as @${connX.xUsername}` });
+
         await loadTasks();
       } else {
         playErrorBeep();
@@ -439,33 +471,48 @@ export default function WaitlistPage({ setActivePage }) {
                       <div className="space-y-3">
                         {connectedX ? (
                           <div className="bg-[#1A231F] border-2 border-black p-3 text-xs flex items-center justify-between">
-                            <span className="text-[#10B981] font-pixel text-[10px]">
-                              ✓ CONNECTED: @{connectedX.xUsername}
-                            </span>
-                            <span className="text-zinc-500 text-[10px]">ID: {connectedX.xId}</span>
+                            <div className="flex items-center gap-2">
+                              <CheckCircle2 size={16} className="text-[#10B981]" />
+                              <span className="text-[#10B981] font-pixel text-[11px]">
+                                CONNECTED AS @{connectedX.xUsername}
+                              </span>
+                            </div>
+                            <span className="text-zinc-500 font-mono text-[10px]">ID: {connectedX.xId}</span>
                           </div>
                         ) : (
-                          <form onSubmit={handleConnectX} className="flex flex-col sm:flex-row gap-2">
-                            <div className="relative flex-1">
-                              <span className="absolute left-3 top-1/2 -translate-y-1/2 text-zinc-500 font-pixel text-xs">@</span>
-                              <input
-                                type="text"
-                                placeholder="your_x_handle"
-                                value={xUsernameInput}
-                                onChange={(e) => setXUsernameInput(e.target.value)}
-                                disabled={isCurrentVerifying}
-                                className="w-full bg-black border-2 border-black pl-8 pr-3 py-2 text-white font-mono text-sm focus:outline-none focus:border-[#FF8800]"
-                              />
+                          <div className="space-y-3">
+                            <form onSubmit={handleConnectX} className="flex flex-col sm:flex-row gap-2">
+                              <div className="relative flex-1">
+                                <span className="absolute left-3 top-1/2 -translate-y-1/2 text-zinc-500 font-pixel text-xs">@</span>
+                                <input
+                                  type="text"
+                                  placeholder="your_x_handle"
+                                  value={xUsernameInput}
+                                  onChange={(e) => setXUsernameInput(e.target.value)}
+                                  disabled={isCurrentVerifying}
+                                  className="w-full bg-black border-2 border-black pl-8 pr-3 py-2 text-white font-mono text-sm focus:outline-none focus:border-[#FF8800]"
+                                />
+                              </div>
+                              <PixelButton
+                                type="submit"
+                                variant="primary"
+                                size="sm"
+                                disabled={isCurrentVerifying || !xUsernameInput.trim()}
+                              >
+                                {isCurrentVerifying ? 'CONNECTING...' : '[ CONNECT X ]'}
+                              </PixelButton>
+                            </form>
+                            <div className="flex items-center gap-2 pt-1 border-t border-zinc-800">
+                              <span className="text-[10px] text-zinc-500 font-pixel">OR</span>
+                              <a
+                                href="/api/waitlist/oauth/x"
+                                className="inline-flex items-center gap-1.5 font-pixel text-[10px] px-3 py-1.5 bg-[#1D9BF0] text-white border-2 border-black hover:bg-[#1A8CD8] shadow-[2px_2px_0px_#000] active:translate-x-[1px] active:translate-y-[1px]"
+                              >
+                                <Twitter size={12} fill="currentColor" />
+                                <span>CONNECT VIA X (OAUTH)</span>
+                              </a>
                             </div>
-                            <PixelButton
-                              type="submit"
-                              variant="primary"
-                              size="sm"
-                              disabled={isCurrentVerifying || !xUsernameInput.trim()}
-                            >
-                              {isCurrentVerifying ? 'CONNECTING...' : '[ CONNECT X ]'}
-                            </PixelButton>
-                          </form>
+                          </div>
                         )}
                       </div>
                     )}
@@ -595,6 +642,19 @@ export default function WaitlistPage({ setActivePage }) {
               </div>
             )}
 
+            {/* Applications Closed Banner if disabled by admin */}
+            {settings.applicationsOpen === false && (
+              <div className="bg-[#2B1B15] border-4 border-black p-4 shadow-[4px_4px_0px_#000] text-amber-200 text-xs space-y-1">
+                <div className="font-pixel text-[11px] text-[#FF8800] flex items-center gap-2 uppercase">
+                  <AlertTriangle size={16} />
+                  <span>APPLICATIONS TEMPORARILY CLOSED</span>
+                </div>
+                <p className="text-zinc-300">
+                  Waitlist quest verification is active, but new wallet submissions have been closed by administrators.
+                </p>
+              </div>
+            )}
+
             {/* Wallet Input Form */}
             <form onSubmit={handleSubmitApplication} className="space-y-4">
               <div>
@@ -606,7 +666,7 @@ export default function WaitlistPage({ setActivePage }) {
                   placeholder="Enter Zcash Shielded address (Unified u1... or Sapling zs1...)"
                   value={walletInput}
                   onChange={(e) => setWalletInput(e.target.value)}
-                  disabled={submittingApp}
+                  disabled={submittingApp || settings.applicationsOpen === false}
                   className="w-full bg-black border-4 border-black px-4 py-3 text-white font-mono text-sm focus:outline-none focus:border-[#FF8800] shadow-[3px_3px_0px_#000]"
                 />
                 <span className="text-[11px] text-zinc-400 mt-1.5 block">
@@ -619,17 +679,19 @@ export default function WaitlistPage({ setActivePage }) {
                   type="submit"
                   variant="primary"
                   size="lg"
-                  disabled={submittingApp || !walletInput.trim() || !progress.allSocialCompleted}
+                  disabled={submittingApp || !walletInput.trim() || !progress.allSocialCompleted || settings.applicationsOpen === false}
                   className="w-full sm:w-auto"
                 >
                   {submittingApp
                     ? 'SUBMITTING TO DATABASE...'
+                    : settings.applicationsOpen === false
+                    ? '[ APPLICATIONS CLOSED ]'
                     : !progress.allSocialCompleted
                     ? '[ COMPLETE QUESTS TO SUBMIT ]'
                     : '[ SUBMIT APPLICATION ]'}
                 </PixelButton>
 
-                {!progress.allSocialCompleted && (
+                {!progress.allSocialCompleted && settings.applicationsOpen !== false && (
                   <span className="text-xs font-pixel text-zinc-500">
                     Complete 5/5 tasks above to enable submission
                   </span>

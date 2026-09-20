@@ -1,8 +1,9 @@
 const express = require('express');
 const router = express.Router();
 const crypto = require('crypto');
-const { db, getRegisteredUsersCount, statsEvents } = require('../db');
+const { db, getRegisteredUsersCount, statsEvents, linkUserToXAccount } = require('../db');
 const xService = require('../services/xService');
+const supabaseService = require('../services/supabase');
 const { submitLimiter, verificationLimiter } = require('../middleware/rateLimit');
 
 // Helper to get or create a session user
@@ -38,15 +39,8 @@ router.get('/tasks', async (req, res) => {
   try {
     const user = await getOrCreateUser(req);
 
-    // Fetch global waitlist & application settings
-    const settingsRes = await db.execute(`
-      SELECT key, value FROM settings 
-      WHERE key IN ('waitlist_enabled', 'applications_open', 'x_verification_mode')
-    `);
-    const settings = {};
-    for (const r of settingsRes.rows) {
-      settings[r.key] = r.value;
-    }
+    // Fetch global waitlist & application settings from Supabase (Source of Truth)
+    const appSettings = await supabaseService.getSettings();
 
     // Fetch active non-archived tasks ordered by sort_order
     const tasksRes = await db.execute(`
@@ -56,31 +50,62 @@ router.get('/tasks', async (req, res) => {
       ORDER BY sort_order ASC
     `);
 
-    // Fetch user's task verifications
-    const verificationsRes = await db.execute({
-      sql: 'SELECT task_id, status, verified_at, metadata FROM task_verifications WHERE user_id = ?',
-      args: [user.id]
-    });
-    const verificationsMap = {};
-    for (const v of verificationsRes.rows) {
-      verificationsMap[v.task_id] = v;
-    }
-
     // Fetch user's connected X account
-    const xRes = await db.execute({
+    let xRes = await db.execute({
       sql: 'SELECT * FROM x_accounts WHERE user_id = ?',
       args: [user.id]
     });
+
+    // Check fallback client hints if session was reset
+    const clientXId = req.headers['x-user-x-id'] || req.cookies?.zeckshark_x_id || req.query.x_id;
+    if (xRes.rows.length === 0 && clientXId) {
+      const existingX = await db.execute({
+        sql: 'SELECT * FROM x_accounts WHERE x_id = ?',
+        args: [clientXId]
+      });
+      if (existingX.rows.length > 0) {
+        const row = existingX.rows[0];
+        await linkUserToXAccount(user.id, row.x_id, row.x_username, row.display_name, row.profile_image_url);
+        xRes = await db.execute({
+          sql: 'SELECT * FROM x_accounts WHERE user_id = ?',
+          args: [user.id]
+        });
+      }
+    }
+
     const connectedX = xRes.rows.length > 0 ? {
       xId: xRes.rows[0].x_id,
       xUsername: xRes.rows[0].x_username,
       displayName: xRes.rows[0].display_name
     } : null;
 
+    // Fetch user's task verifications (tied to user_id OR authenticated x_id)
+    const verificationsRes = await db.execute({
+      sql: 'SELECT task_id, status, verified_at, metadata FROM task_verifications WHERE user_id = ? OR (x_id IS NOT NULL AND x_id = ?)',
+      args: [user.id, connectedX ? connectedX.xId : '']
+    });
+
+    const verificationsMap = {};
+    for (const v of verificationsRes.rows) {
+      if (!verificationsMap[v.task_id] || v.status === 'VERIFIED') {
+        verificationsMap[v.task_id] = v;
+      }
+    }
+
+    // If user has a connected X account, Task 01 is GUARANTEED verified in database
+    if (connectedX) {
+      const task1Row = tasksRes.rows.find(t => t.sort_order === 1 || t.verification_type === 'CONNECT_X');
+      const task1Id = task1Row ? task1Row.id : 1;
+      verificationsMap[task1Id] = {
+        status: 'VERIFIED',
+        verified_at: verificationsMap[task1Id]?.verified_at || new Date().toISOString()
+      };
+    }
+
     // Fetch existing application if submitted
     const appRes = await db.execute({
-      sql: 'SELECT * FROM applications WHERE user_id = ?',
-      args: [user.id]
+      sql: 'SELECT * FROM applications WHERE user_id = ? OR (x_id IS NOT NULL AND x_id = ?)',
+      args: [user.id, connectedX ? connectedX.xId : '']
     });
     const application = appRes.rows.length > 0 ? {
       applicationCode: appRes.rows[0].application_code,
@@ -91,15 +116,19 @@ router.get('/tasks', async (req, res) => {
     } : null;
 
     // Determine sequential state for each task:
-    // LOCKED, READY, VERIFYING, VERIFIED, FAILED, TRY AGAIN
+    // LOCKED, READY, VERIFYING, VERIFIED, FAILED
     let previousVerified = true;
     let completedCount = 0;
 
     const tasks = tasksRes.rows.map((task, index) => {
+      const isTask1 = index === 0 || task.verification_type === 'CONNECT_X';
       const v = verificationsMap[task.id];
       let taskState = 'LOCKED';
 
-      if (v && v.status === 'VERIFIED') {
+      if (isTask1 && connectedX) {
+        taskState = 'VERIFIED';
+        completedCount++;
+      } else if (v && v.status === 'VERIFIED') {
         taskState = 'VERIFIED';
         completedCount++;
       } else if (v && v.status === 'FAILED') {
@@ -126,20 +155,37 @@ router.get('/tasks', async (req, res) => {
         isEnabled: Boolean(task.is_enabled),
         state: taskState,
         verifiedAt: v?.verified_at || null,
-        metadata: v?.metadata ? JSON.parse(v.metadata) : null
+        metadata: v?.metadata ? (typeof v.metadata === 'string' ? JSON.parse(v.metadata) : v.metadata) : null
       };
     });
 
     const totalSocialTasks = tasks.length;
     const allSocialTasksCompleted = completedCount >= totalSocialTasks && totalSocialTasks > 0;
 
+    // Set cookie headers for session persistence
+    res.cookie('zeckshark_session', user.session_token, {
+      maxAge: 30 * 24 * 3600 * 1000,
+      httpOnly: false,
+      sameSite: 'lax',
+      path: '/'
+    });
+    if (connectedX?.xId) {
+      res.cookie('zeckshark_x_id', connectedX.xId, {
+        maxAge: 30 * 24 * 3600 * 1000,
+        httpOnly: false,
+        sameSite: 'lax',
+        path: '/'
+      });
+    }
+
     res.json({
       success: true,
       sessionToken: user.session_token,
       settings: {
-        waitlistEnabled: settings.waitlist_enabled !== 'false',
-        applicationsOpen: settings.applications_open !== 'false',
-        verificationMode: settings.x_verification_mode || 'DEMO'
+        waitlistEnabled: appSettings.isWaitlistEnabled,
+        applicationsOpen: appSettings.isApplicationsEnabled,
+        applicationsEnabled: appSettings.isApplicationsEnabled,
+        verificationMode: appSettings.x_verification_mode || 'DEMO'
       },
       connectedX,
       tasks,
@@ -192,42 +238,27 @@ router.post('/connect-x', verificationLimiter, async (req, res) => {
     // Deterministic simulated or real X ID
     const xId = verification.metadata?.xId || `x_user_${crypto.createHash('md5').update(cleanUsername.toLowerCase()).digest('hex').substring(0, 10)}`;
 
-    // Store or update x_accounts
-    await db.execute({
-      sql: `
-        INSERT INTO x_accounts (user_id, x_id, x_username, display_name) 
-        VALUES (?, ?, ?, ?)
-        ON CONFLICT(x_id) DO UPDATE SET 
-          user_id = excluded.user_id,
-          x_username = excluded.x_username,
-          connected_at = CURRENT_TIMESTAMP
-      `,
-      args: [user.id, xId, cleanUsername, `@${cleanUsername}`]
-    });
+    // Link user to X account in database and mark Task 01 as VERIFIED
+    await linkUserToXAccount(user.id, xId, cleanUsername, `@${cleanUsername}`);
 
-    // Mark task 1 verified in task_verifications
-    const task1 = await db.execute({
-      sql: "SELECT id FROM tasks WHERE verification_type = 'CONNECT_X' AND is_archived = 0 LIMIT 1"
+    // Set persistent session cookies
+    res.cookie('zeckshark_session', user.session_token, {
+      maxAge: 30 * 24 * 3600 * 1000,
+      httpOnly: false,
+      sameSite: 'lax',
+      path: '/'
     });
-
-    if (task1.rows.length > 0) {
-      const taskId = task1.rows[0].id;
-      await db.execute({
-        sql: `
-          INSERT INTO task_verifications (user_id, task_id, status, metadata) 
-          VALUES (?, ?, 'VERIFIED', ?)
-          ON CONFLICT(user_id, task_id) DO UPDATE SET 
-            status = 'VERIFIED',
-            verified_at = CURRENT_TIMESTAMP,
-            metadata = excluded.metadata
-        `,
-        args: [user.id, taskId, JSON.stringify({ xId, xUsername: cleanUsername, mode: verification.mode })]
-      });
-    }
+    res.cookie('zeckshark_x_id', xId, {
+      maxAge: 30 * 24 * 3600 * 1000,
+      httpOnly: false,
+      sameSite: 'lax',
+      path: '/'
+    });
 
     res.json({
       success: true,
       state: 'VERIFIED',
+      sessionToken: user.session_token,
       connectedX: {
         xId,
         xUsername: cleanUsername,
@@ -237,6 +268,51 @@ router.post('/connect-x', verificationLimiter, async (req, res) => {
   } catch (err) {
     console.error('Error connecting X account:', err);
     res.status(500).json({ success: false, error: 'Internal server error while connecting X account.' });
+  }
+});
+
+// 2b. X OAuth Redirection Flow & Callback
+router.get('/oauth/x', async (req, res) => {
+  try {
+    const user = await getOrCreateUser(req);
+    const { username } = req.query;
+    const targetUsername = username ? String(username).replace(/^@/, '').trim() : 'zecshark_user';
+    const xId = `x_user_${crypto.createHash('md5').update(targetUsername.toLowerCase()).digest('hex').substring(0, 10)}`;
+
+    // In demo mode, simulate instant authorization
+    await linkUserToXAccount(user.id, xId, targetUsername, `@${targetUsername}`);
+
+    res.cookie('zeckshark_session', user.session_token, { maxAge: 30 * 24 * 3600 * 1000, httpOnly: false, sameSite: 'lax', path: '/' });
+    res.cookie('zeckshark_x_id', xId, { maxAge: 30 * 24 * 3600 * 1000, httpOnly: false, sameSite: 'lax', path: '/' });
+
+    res.redirect(`/waitlist?x_connected=true&username=${encodeURIComponent(targetUsername)}&x_id=${encodeURIComponent(xId)}`);
+  } catch (err) {
+    console.error('OAuth initiation error:', err);
+    res.redirect('/waitlist?oauth_error=failed');
+  }
+});
+
+router.get('/oauth/x/callback', async (req, res) => {
+  try {
+    const user = await getOrCreateUser(req);
+    const { username, x_id, error } = req.query;
+
+    if (error) {
+      return res.redirect(`/waitlist?oauth_error=${encodeURIComponent(error)}`);
+    }
+
+    const cleanUsername = username ? String(username).replace(/^@/, '').trim() : 'zecshark_fren';
+    const cleanXId = x_id || `x_user_${crypto.createHash('md5').update(cleanUsername.toLowerCase()).digest('hex').substring(0, 10)}`;
+
+    await linkUserToXAccount(user.id, cleanXId, cleanUsername, `@${cleanUsername}`);
+
+    res.cookie('zeckshark_session', user.session_token, { maxAge: 30 * 24 * 3600 * 1000, httpOnly: false, sameSite: 'lax', path: '/' });
+    res.cookie('zeckshark_x_id', cleanXId, { maxAge: 30 * 24 * 3600 * 1000, httpOnly: false, sameSite: 'lax', path: '/' });
+
+    res.redirect(`/waitlist?x_connected=true&username=${encodeURIComponent(cleanUsername)}&x_id=${encodeURIComponent(cleanXId)}`);
+  } catch (err) {
+    console.error('OAuth callback error:', err);
+    res.redirect('/waitlist?oauth_error=callback_failed');
   }
 });
 
@@ -261,10 +337,27 @@ router.post('/verify-task', verificationLimiter, async (req, res) => {
     const currentTask = taskRes.rows[0];
 
     // 2. Fetch user's connected X account
-    const xRes = await db.execute({
+    let xRes = await db.execute({
       sql: 'SELECT * FROM x_accounts WHERE user_id = ?',
       args: [user.id]
     });
+
+    const clientXId = req.headers['x-user-x-id'] || req.cookies?.zeckshark_x_id;
+    if (xRes.rows.length === 0 && clientXId) {
+      const existingX = await db.execute({
+        sql: 'SELECT * FROM x_accounts WHERE x_id = ?',
+        args: [clientXId]
+      });
+      if (existingX.rows.length > 0) {
+        const row = existingX.rows[0];
+        await linkUserToXAccount(user.id, row.x_id, row.x_username, row.display_name, row.profile_image_url);
+        xRes = await db.execute({
+          sql: 'SELECT * FROM x_accounts WHERE user_id = ?',
+          args: [user.id]
+        });
+      }
+    }
+
     if (xRes.rows.length === 0) {
       return res.status(400).json({
         success: false,
@@ -273,17 +366,17 @@ router.post('/verify-task', verificationLimiter, async (req, res) => {
     }
     const userX = xRes.rows[0];
 
-    // 3. CRITICAL: Enforce strict sequential order!
+    // 3. Strict sequential order verification
     // Check that all tasks preceding currentTask.sort_order are already VERIFIED.
     const precedingTasksRes = await db.execute({
       sql: `
         SELECT t.id, t.name, tv.status 
         FROM tasks t 
-        LEFT JOIN task_verifications tv ON tv.task_id = t.id AND tv.user_id = ? 
+        LEFT JOIN task_verifications tv ON tv.task_id = t.id AND (tv.user_id = ? OR tv.x_id = ?) 
         WHERE t.is_archived = 0 AND t.is_enabled = 1 AND t.sort_order < ?
         ORDER BY t.sort_order ASC
       `,
-      args: [user.id, currentTask.sort_order]
+      args: [user.id, userX.x_id, currentTask.sort_order]
     });
 
     for (const prec of precedingTasksRes.rows) {
@@ -308,13 +401,14 @@ router.post('/verify-task', verificationLimiter, async (req, res) => {
       // Record failed attempt
       await db.execute({
         sql: `
-          INSERT INTO task_verifications (user_id, task_id, status, metadata) 
-          VALUES (?, ?, 'FAILED', ?)
+          INSERT INTO task_verifications (user_id, x_id, task_id, status, metadata) 
+          VALUES (?, ?, ?, 'FAILED', ?)
           ON CONFLICT(user_id, task_id) DO UPDATE SET 
             status = 'FAILED',
+            x_id = excluded.x_id,
             metadata = excluded.metadata
         `,
-        args: [user.id, currentTask.id, JSON.stringify({ error: verification.error, attemptedAt: new Date().toISOString() })]
+        args: [user.id, userX.x_id, currentTask.id, JSON.stringify({ error: verification.error, attemptedAt: new Date().toISOString() })]
       });
 
       return res.status(400).json({
@@ -324,22 +418,24 @@ router.post('/verify-task', verificationLimiter, async (req, res) => {
       });
     }
 
-    // 5. Record verified status
+    // 5. Record verified status bound to user_id AND x_id
     await db.execute({
       sql: `
-        INSERT INTO task_verifications (user_id, task_id, status, metadata) 
-        VALUES (?, ?, 'VERIFIED', ?)
+        INSERT INTO task_verifications (user_id, x_id, task_id, status, metadata) 
+        VALUES (?, ?, ?, 'VERIFIED', ?)
         ON CONFLICT(user_id, task_id) DO UPDATE SET 
           status = 'VERIFIED',
+          x_id = excluded.x_id,
           verified_at = CURRENT_TIMESTAMP,
           metadata = excluded.metadata
       `,
-      args: [user.id, currentTask.id, JSON.stringify(verification.metadata || {})]
+      args: [user.id, userX.x_id, currentTask.id, JSON.stringify(verification.metadata || {})]
     });
 
     res.json({
       success: true,
       state: 'VERIFIED',
+      sessionToken: user.session_token,
       taskId: currentTask.id,
       taskName: currentTask.name
     });
@@ -355,20 +451,13 @@ router.post('/submit', submitLimiter, async (req, res) => {
     const user = await getOrCreateUser(req);
     const { walletAddress } = req.body;
 
-    // 1. Check Global Settings
-    const settingsRes = await db.execute(`
-      SELECT key, value FROM settings 
-      WHERE key IN ('waitlist_enabled', 'applications_open')
-    `);
-    const settings = {};
-    for (const r of settingsRes.rows) {
-      settings[r.key] = r.value;
-    }
+    // 1. Check Global Settings from Supabase (Source of Truth)
+    const settings = await supabaseService.getSettings();
 
-    if (settings.waitlist_enabled === 'false') {
+    if (!settings.isWaitlistEnabled) {
       return res.status(403).json({ success: false, error: 'The waitlist is currently paused by administrators.' });
     }
-    if (settings.applications_open === 'false') {
+    if (!settings.isApplicationsEnabled) {
       return res.status(403).json({ success: false, error: 'Waitlist applications are currently closed.' });
     }
 
@@ -422,8 +511,8 @@ router.post('/submit', submitLimiter, async (req, res) => {
     const activeTaskIds = activeTasksRes.rows.map(t => t.id);
 
     const userVerificationsRes = await db.execute({
-      sql: `SELECT task_id FROM task_verifications WHERE user_id = ? AND status = 'VERIFIED'`,
-      args: [user.id]
+      sql: `SELECT task_id FROM task_verifications WHERE (user_id = ? OR x_id = ?) AND status = 'VERIFIED'`,
+      args: [user.id, userX.x_id]
     });
     const verifiedIds = new Set(userVerificationsRes.rows.map(v => v.task_id));
 
@@ -460,11 +549,9 @@ router.post('/submit', submitLimiter, async (req, res) => {
     }
 
     // 6. ATOMIC APPLICATION REGISTRATION & COUNT INCREMENT
-    // Generate unique Application Code: #ZK-XXXXXX
     const randomSuffix = crypto.randomBytes(3).toString('hex').toUpperCase();
     const appCode = `#ZK-${randomSuffix}`;
 
-    // Execute insert within database
     await db.execute({
       sql: `
         INSERT INTO applications (application_code, user_id, x_id, x_username, wallet_address, status)
@@ -473,10 +560,7 @@ router.post('/submit', submitLimiter, async (req, res) => {
       args: [appCode, user.id, userX.x_id, userX.x_username, cleanWallet]
     });
 
-    // 7. Get the exact real registered users count from database
     const newCount = await getRegisteredUsersCount();
-
-    // 8. Broadcast live count update via SSE stream to all open browsers
     statsEvents.emit('update', newCount);
 
     res.json({
@@ -509,28 +593,30 @@ router.post('/auto-verify-all', async (req, res) => {
       args: [user.id]
     });
 
+    let xId;
+    let xUsername;
     if (xRes.rows.length === 0) {
-      const defaultUsername = 'zeckshark_alpha';
-      const xId = `x_user_${crypto.randomBytes(4).toString('hex')}`;
-      await db.execute({
-        sql: `
-          INSERT INTO x_accounts (user_id, x_id, x_username, display_name)
-          VALUES (?, ?, ?, ?)
-        `,
-        args: [user.id, xId, defaultUsername, `@${defaultUsername}`]
-      });
+      xUsername = 'zeckshark_alpha';
+      xId = `x_user_${crypto.randomBytes(4).toString('hex')}`;
+      await linkUserToXAccount(user.id, xId, xUsername, `@${xUsername}`);
+    } else {
+      xId = xRes.rows[0].x_id;
+      xUsername = xRes.rows[0].x_username;
     }
 
-    // 2. Mark all active tasks verified
+    // 2. Mark all active tasks verified tied to x_id
     const activeTasks = await db.execute('SELECT id, name FROM tasks WHERE is_archived = 0 AND is_enabled = 1');
     for (const t of activeTasks.rows) {
       await db.execute({
         sql: `
-          INSERT INTO task_verifications (user_id, task_id, status, metadata)
-          VALUES (?, ?, 'VERIFIED', ?)
-          ON CONFLICT(user_id, task_id) DO UPDATE SET status = 'VERIFIED', verified_at = CURRENT_TIMESTAMP
+          INSERT INTO task_verifications (user_id, x_id, task_id, status, metadata)
+          VALUES (?, ?, ?, 'VERIFIED', ?)
+          ON CONFLICT(user_id, task_id) DO UPDATE SET 
+            status = 'VERIFIED', 
+            x_id = excluded.x_id,
+            verified_at = CURRENT_TIMESTAMP
         `,
-        args: [user.id, t.id, JSON.stringify({ verified: true, autoVerified: true })]
+        args: [user.id, xId, t.id, JSON.stringify({ verified: true, autoVerified: true })]
       });
     }
 
@@ -546,4 +632,3 @@ router.post('/auto-verify-all', async (req, res) => {
 });
 
 module.exports = router;
-

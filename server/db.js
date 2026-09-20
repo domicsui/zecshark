@@ -82,6 +82,7 @@ async function initDB() {
     CREATE TABLE IF NOT EXISTS task_verifications (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       user_id INTEGER NOT NULL,
+      x_id TEXT,
       task_id INTEGER NOT NULL,
       status TEXT NOT NULL,
       verified_at DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -91,6 +92,17 @@ async function initDB() {
       FOREIGN KEY(task_id) REFERENCES tasks(id)
     )
   `);
+
+  try {
+    await db.execute('ALTER TABLE task_verifications ADD COLUMN x_id TEXT');
+  } catch (err) {
+    // Column already exists
+  }
+  try {
+    await db.execute('CREATE INDEX IF NOT EXISTS idx_task_verifications_x_id ON task_verifications(x_id)');
+  } catch (err) {
+    // Index may already exist
+  }
 
   await db.execute(`
     CREATE TABLE IF NOT EXISTS applications (
@@ -249,10 +261,77 @@ async function logAudit(admin_username, action, target, details = '') {
   }
 }
 
+async function linkUserToXAccount(userId, xId, xUsername, displayName, profileImageUrl) {
+  // 1. Upsert x_accounts record
+  await db.execute({
+    sql: `
+      INSERT INTO x_accounts (user_id, x_id, x_username, display_name, profile_image_url)
+      VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(x_id) DO UPDATE SET
+        user_id = excluded.user_id,
+        x_username = excluded.x_username,
+        display_name = COALESCE(excluded.display_name, x_accounts.display_name),
+        profile_image_url = COALESCE(excluded.profile_image_url, x_accounts.profile_image_url),
+        connected_at = CURRENT_TIMESTAMP
+    `,
+    args: [userId, xId, xUsername, displayName || `@${xUsername}`, profileImageUrl || null]
+  });
+
+  // 2. Consolidate any existing verifications for this xId into the current user_id
+  const prevVerifs = await db.execute({
+    sql: 'SELECT task_id, status, verified_at, metadata FROM task_verifications WHERE x_id = ? AND user_id != ?',
+    args: [xId, userId]
+  });
+
+  for (const pv of prevVerifs.rows) {
+    await db.execute({
+      sql: `
+        INSERT INTO task_verifications (user_id, x_id, task_id, status, verified_at, metadata)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(user_id, task_id) DO UPDATE SET
+          x_id = excluded.x_id,
+          status = CASE WHEN excluded.status = 'VERIFIED' THEN 'VERIFIED' ELSE task_verifications.status END,
+          verified_at = CASE WHEN excluded.status = 'VERIFIED' THEN excluded.verified_at ELSE task_verifications.verified_at END,
+          metadata = COALESCE(excluded.metadata, task_verifications.metadata)
+      `,
+      args: [userId, xId, pv.task_id, pv.status, pv.verified_at, pv.metadata]
+    });
+  }
+
+  // Ensure any existing verifications under current user_id have x_id set
+  await db.execute({
+    sql: "UPDATE task_verifications SET x_id = ? WHERE user_id = ? AND (x_id IS NULL OR x_id = '')",
+    args: [xId, userId]
+  });
+
+  // 3. Mark Task 01 (CONNECT_X) as VERIFIED for this user and xId
+  const task1Res = await db.execute({
+    sql: "SELECT id FROM tasks WHERE verification_type = 'CONNECT_X' AND is_archived = 0 ORDER BY sort_order ASC LIMIT 1"
+  });
+
+  const task1Id = task1Res.rows.length > 0 ? task1Res.rows[0].id : 1;
+
+  await db.execute({
+    sql: `
+      INSERT INTO task_verifications (user_id, x_id, task_id, status, metadata)
+      VALUES (?, ?, ?, 'VERIFIED', ?)
+      ON CONFLICT(user_id, task_id) DO UPDATE SET
+        x_id = excluded.x_id,
+        status = 'VERIFIED',
+        verified_at = CURRENT_TIMESTAMP,
+        metadata = excluded.metadata
+    `,
+    args: [userId, xId, task1Id, JSON.stringify({ xId, xUsername, connectedAt: new Date().toISOString() })]
+  });
+
+  return { task1Id, xId, xUsername };
+}
+
 module.exports = {
   db,
   initDB,
   getRegisteredUsersCount,
   statsEvents,
-  logAudit
+  logAudit,
+  linkUserToXAccount
 };

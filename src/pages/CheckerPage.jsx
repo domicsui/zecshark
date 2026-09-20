@@ -9,7 +9,17 @@ import { ShieldCheck, XCircle, Search, AlertCircle, Sparkles, HelpCircle } from 
 export default function CheckerPage({ setActivePage }) {
   const [walletInput, setWalletInput] = useState('');
   const [checking, setChecking] = useState(false);
+  const [checkerEnabled, setCheckerEnabled] = useState(true);
   const [result, setResult] = useState(null); // { eligible: boolean, address: string, error?: string }
+
+  // Load live checker feature toggle from backend
+  React.useEffect(() => {
+    fetchApi('/checker/status').then(res => {
+      if (res.ok && res.data) {
+        setCheckerEnabled(res.data.walletCheckerEnabled !== false);
+      }
+    }).catch(() => {});
+  }, []);
 
   const handleCheck = async (e) => {
     e.preventDefault();
@@ -67,7 +77,18 @@ export default function CheckerPage({ setActivePage }) {
 
       {/* Main Checker Box */}
       <div className="border-4 border-black bg-[#13141F] p-6 sm:p-10 shadow-[8px_8px_0px_#000]">
-        
+        {!checkerEnabled && (
+          <div className="mb-6 bg-[#2B1717] border-4 border-black p-4 shadow-[4px_4px_0px_#000] text-red-200 text-xs space-y-1">
+            <div className="font-pixel text-[11px] text-[#EF4444] flex items-center gap-2 uppercase">
+              <AlertCircle size={16} />
+              <span>WALLET CHECKER OFFLINE</span>
+            </div>
+            <p className="text-zinc-300">
+              The Wallet Eligibility Checker is temporarily offline for maintenance by administrators. Please check back later.
+            </p>
+          </div>
+        )}
+
         <form onSubmit={handleCheck} className="space-y-6">
           <div>
             <label className="font-pixel text-xs text-[#FFC107] block mb-2">
@@ -79,7 +100,7 @@ export default function CheckerPage({ setActivePage }) {
                 placeholder="u1... or zs1..."
                 value={walletInput}
                 onChange={(e) => setWalletInput(e.target.value)}
-                disabled={checking}
+                disabled={checking || !checkerEnabled}
                 className="w-full bg-black border-4 border-black px-4 py-3.5 text-white font-mono text-sm focus:outline-none focus:border-[#FF8800] shadow-[4px_4px_0px_#000]"
               />
             </div>
@@ -94,10 +115,10 @@ export default function CheckerPage({ setActivePage }) {
               type="submit"
               variant="primary"
               size="lg"
-              disabled={checking || !walletInput.trim()}
+              disabled={checking || !walletInput.trim() || !checkerEnabled}
               className="w-full sm:w-auto"
             >
-              {checking ? 'SCANNING DATABASE...' : '[ CHECK ELIGIBILITY ]'}
+              {checking ? 'SCANNING DATABASE...' : !checkerEnabled ? '[ CHECKER OFFLINE ]' : '[ CHECK ELIGIBILITY ]'}
             </PixelButton>
 
             {walletInput && (

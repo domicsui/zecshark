@@ -10,6 +10,18 @@ export function setSessionToken(token) {
   }
 }
 
+export function getXId() {
+  return localStorage.getItem('zeckshark_x_id') || '';
+}
+
+export function setXId(xId) {
+  if (xId) {
+    localStorage.setItem('zeckshark_x_id', xId);
+  } else {
+    localStorage.removeItem('zeckshark_x_id');
+  }
+}
+
 export function getAdminToken() {
   return localStorage.getItem('zeckshark_admin_token') || '';
 }
@@ -33,6 +45,11 @@ export async function fetchApi(endpoint, options = {}) {
     headers['x-session-token'] = sessionToken;
   }
 
+  const xId = getXId();
+  if (xId) {
+    headers['x-user-x-id'] = xId;
+  }
+
   const adminToken = getAdminToken();
   if (adminToken && !headers['Authorization']) {
     headers['Authorization'] = `Bearer ${adminToken}`;
@@ -47,6 +64,10 @@ export async function fetchApi(endpoint, options = {}) {
 
   if (data.sessionToken) {
     setSessionToken(data.sessionToken);
+  }
+
+  if (data.connectedX?.xId) {
+    setXId(data.connectedX.xId);
   }
 
   return { ok: res.ok, status: res.status, data };
