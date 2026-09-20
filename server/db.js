@@ -6,9 +6,19 @@ const EventEmitter = require('events');
 const statsEvents = new EventEmitter();
 statsEvents.setMaxListeners(100);
 
-const dbPath = path.resolve(__dirname, '..', 'zeckshark.db');
+let dbUrl;
+if (process.env.TURSO_DATABASE_URL || process.env.DATABASE_URL) {
+  dbUrl = process.env.TURSO_DATABASE_URL || process.env.DATABASE_URL;
+} else if (process.env.VERCEL) {
+  dbUrl = 'file:/tmp/zeckshark.db';
+} else {
+  const dbPath = path.resolve(__dirname, '..', 'zeckshark.db');
+  dbUrl = 'file:' + dbPath.replace(/\\/g, '/');
+}
+
 const db = createClient({
-  url: 'file:' + dbPath.replace(/\\/g, '/')
+  url: dbUrl,
+  authToken: process.env.TURSO_AUTH_TOKEN
 });
 
 async function initDB() {

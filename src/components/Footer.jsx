@@ -81,7 +81,13 @@ export default function Footer({ setActivePage }) {
 
         <div className="border-t-2 border-black/80 pt-8 flex flex-col sm:flex-row items-center justify-between text-xs text-zinc-500 gap-4">
           <p>© 2026 ZECKSHARK. All rights reserved. 2222 Pixel Sharks.</p>
-          <p className="font-pixel text-[10px] text-zinc-600">ARCADE EDITION v1.0.0</p>
+          <button
+            onClick={() => { setActivePage('admin'); window.scrollTo(0, 0); }}
+            title="Admin Access"
+            className="font-pixel text-[10px] text-zinc-600 hover:text-zinc-400 transition-colors focus:outline-none"
+          >
+            ARCADE EDITION v1.0.0
+          </button>
         </div>
       </div>
     </footer>

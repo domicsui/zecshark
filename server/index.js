@@ -50,17 +50,19 @@ app.use((req, res, next) => {
   });
 });
 
-// Initialize database and start listening
-initDB().then(() => {
-  app.listen(PORT, () => {
-    console.log(`=========================================`);
-    console.log(`🦈 ZECKSHARK Backend Engine Ready`);
-    console.log(`📡 Server running on: http://localhost:${PORT}`);
-    console.log(`=========================================`);
+// Initialize database and start listening (when not in serverless)
+if (!process.env.VERCEL) {
+  initDB().then(() => {
+    app.listen(PORT, () => {
+      console.log(`=========================================`);
+      console.log(`🦈 ZECKSHARK Backend Engine Ready`);
+      console.log(`📡 Server running on: http://localhost:${PORT}`);
+      console.log(`=========================================`);
+    });
+  }).catch(err => {
+    console.error('Fatal Database Initialization Error:', err);
+    process.exit(1);
   });
-}).catch(err => {
-  console.error('Fatal Database Initialization Error:', err);
-  process.exit(1);
-});
+}
 
 module.exports = app;
