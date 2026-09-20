@@ -1,0 +1,102 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+}
+
+/* Custom retro arcade scrollbar */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-track {
+  background: #0D0E14;
+  border-left: 2px solid #000;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #FF8800;
+  border: 2px solid #000;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #FFA726;
+}
+
+/* Retro arcade background pattern */
+.arcade-grid {
+  background-image: 
+    linear-gradient(to right, rgba(255, 136, 0, 0.05) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(255, 136, 0, 0.05) 1px, transparent 1px);
+  background-size: 32px 32px;
+}
+
+/* Subtle CRT Scanline effect */
+.crt-scanlines {
+  background: linear-gradient(
+    rgba(18, 16, 16, 0) 50%, 
+    rgba(0, 0, 0, 0.25) 50%
+  );
+  background-size: 100% 4px;
+}
+
+/* Pixel art corners & chunky buttons */
+.pixel-box {
+  border: 4px solid #000000;
+  box-shadow: 4px 4px 0px #000000;
+}
+
+.pixel-box-sm {
+  border: 2px solid #000000;
+  box-shadow: 2px 2px 0px #000000;
+}
+
+.pixel-box-hover {
+  transition: transform 0.1s ease, box-shadow 0.1s ease;
+}
+
+.pixel-box-hover:hover {
+  transform: translate(-2px, -2px);
+  box-shadow: 6px 6px 0px #000000;
+}
+
+.pixel-box-hover:active {
+  transform: translate(2px, 2px);
+  box-shadow: 2px 2px 0px #000000;
+}
+
+/* Text glow */
+.text-pixel-glow {
+  text-shadow: 0 0 10px rgba(255, 136, 0, 0.6), 0 0 20px rgba(255, 193, 7, 0.4);
+}
+
+/* Underwater and Arcade Animations */
+@keyframes underwater-bob {
+  0%, 100% {
+    transform: translateY(0px) scale(1);
+  }
+  50% {
+    transform: translateY(-8px) scale(1.02);
+  }
+}
+
+.animate-underwater-bob {
+  animation: underwater-bob 3.5s ease-in-out infinite;
+}
+
+@keyframes float-slow {
+  0%, 100% {
+    transform: translateY(-4px) rotate(-1deg);
+  }
+  50% {
+    transform: translateY(6px) rotate(1.5deg);
+  }
+}
+
+.animate-float-slow {
+  animation: float-slow 5s ease-in-out infinite;
+}
+
